@@ -75,11 +75,6 @@ elimina quella cartella, l'EXE e i suoi collegamenti. I video scaricati non veng
 | `requirements-build.txt` | versioni esatte delle librerie usate per creare l'EXE |
 | `selfcheck.py` | controllo rapido della logica senza finestra: `.venv\Scripts\python.exe selfcheck.py` |
 
-### Pubblicare una nuova versione
-1. In `app.py` aumenta `APP_VERSION` (es. `1.3.0` → `1.3.1` per correzioni, `1.4.0` per novità).
-2. Fai commit e tagga `v` + versione (es. `v1.3.0`) per far compilare e firmare `AxTools.exe` a GitHub Actions (oppure esegui `crea-exe.bat` in locale su Windows per ottenere `AxTools.exe` e `AxTools.exe.sig`).
-3. Su GitHub pubblica la bozza di Release con allegati **sia `AxTools.exe` sia `AxTools.exe.sig`** corrispondenti ad `APP_VERSION`.
-
 ## Licenza
 [MIT](LICENSE) © 2026 nonsonoAxel. AxTools scarica e usa [yt-dlp](https://github.com/yt-dlp/yt-dlp)
 (Unlicense), [FFmpeg](https://ffmpeg.org) (GPL) e [Deno](https://deno.com) (MIT), che restano dei rispettivi autori.
