@@ -36,7 +36,7 @@ jobs:
         shell: pwsh
         run: |
           $tagVer = $env:GITHUB_REF_NAME -replace '^[vV]', ''
-          $appVer = python -c "import re; m=re.search(r'^APP_VERSION\s*=\s*\"([^\"]+)\"', open('app.py', encoding='utf-8').read(), re.M); print(m.group(1))"
+          $appVer = python -c 'import firma; print(firma._from_app("APP_VERSION"))'
           if ($tagVer -ne $appVer) {
             Write-Error "Il tag ($env:GITHUB_REF_NAME) non corrisponde ad APP_VERSION ($appVer) in app.py"
             exit 1
