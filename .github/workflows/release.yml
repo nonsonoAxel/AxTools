@@ -1,0 +1,92 @@
+name: Crea e firma AxTools.exe
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Scarica il codice
+        uses: actions/checkout@v4
+
+      - name: Configura Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-build.txt
+
+      - name: Installa dipendenze esatte
+        run: python -m pip install -r requirements-build.txt
+
+      - name: Controllo sintassi e test logica
+        run: |
+          python -m py_compile app.py trascrizione.py convertitore.py firma.py make_icon.py selfcheck.py
+          python selfcheck.py
+
+      - name: Verifica versione del tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $tagVer = $env:GITHUB_REF_NAME -replace '^[vV]', ''
+          $appVer = python -c "import re; m=re.search(r'^APP_VERSION\s*=\s*\"([^\"]+)\"', open('app.py', encoding='utf-8').read(), re.M); print(m.group(1))"
+          if ($tagVer -ne $appVer) {
+            Write-Error "Il tag ($env:GITHUB_REF_NAME) non corrisponde ad APP_VERSION ($appVer) in app.py"
+            exit 1
+          }
+
+      - name: Prepara icona e compila AxTools.exe
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "axtools.ico")) { python make_icon.py }
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --name AxTools `
+            --icon "$PWD\axtools.ico" --add-data "$PWD\ui;ui" `
+            --distpath . --workpath "$env:TEMP\axtools-build" --specpath "$env:TEMP\axtools-build" app.py
+
+      - name: Firma AxTools.exe con chiave Ed25519
+        env:
+          AXTOOLS_SIGNING_KEY: ${{ secrets.AXTOOLS_SIGNING_KEY || secrets.AXGRAB_SIGNING_KEY }}
+        shell: pwsh
+        run: |
+          if (-not $env:AXTOOLS_SIGNING_KEY) {
+            if ($env:GITHUB_REF -like 'refs/tags/v*') {
+              Write-Error "Secret AXTOOLS_SIGNING_KEY mancante: impossibile firmare la release."
+              exit 1
+            }
+            Write-Warning "Secret AXTOOLS_SIGNING_KEY non impostato: salto la firma (solo test build)."
+            exit 0
+          }
+          $keyFile = Join-Path $env:RUNNER_TEMP "axtools-signing-key.txt"
+          try {
+            Set-Content -Path $keyFile -Value $env:AXTOOLS_SIGNING_KEY.Trim() -NoNewline -Encoding ascii
+            $env:AXTOOLS_CHIAVE = $keyFile
+            python firma.py AxTools.exe
+          } finally {
+            Remove-Item -LiteralPath $keyFile -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Carica artifact della build
+        uses: actions/upload-artifact@v4
+        with:
+          name: AxTools-Windows
+          path: |
+            AxTools.exe
+            AxTools.exe.sig
+          if-no-files-found: ignore
+
+      - name: Crea bozza di Release su GitHub
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $ver = $env:GITHUB_REF_NAME -replace '^[vV]', ''
+          gh release create "$env:GITHUB_REF_NAME" AxTools.exe AxTools.exe.sig `
+            --draft --title "AxTools $ver" --generate-notes

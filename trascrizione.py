@@ -140,7 +140,7 @@ def identify(path) -> dict:
         usable = official in model_files()
         return {**info, "status": "ok" if usable else "other", "official": official, "sha": sha,
                 "why": "Modello ufficiale, integro." if usable else
-                       f"Modello ufficiale ({official}), ma non tra quelli consigliati in AxGrab."}
+                       f"Modello ufficiale ({official}), ma non tra quelli consigliati in AxTools."}
     return {**info, "status": "unknown", "why":
             "Non corrisponde a nessun modello ufficiale: probabilmente un download interrotto o un file "
             "modificato. Non viene usato."}
@@ -199,3 +199,192 @@ GPU_OK_RE = re.compile(r"using CUDA\d+ backend")
 
 
 PROGRESS_RE = re.compile(r"progress\s*=\s*(\d+)%")
+
+
+# ---------- separazione interlocutori (sherpa-onnx, on-demand ~61 MB) ----------
+DIAR_ENGINE_URL = ("https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.3/"
+                   "sherpa-onnx-v2.0.3-win-x64-shared-MT-MinSizeRel-no-tts.tar.bz2")
+DIAR_ENGINE_SHA = "5cfc8a51ccf76f4a812cb39c1a08b2c8a9e4aad08f6d482a7ff5f562674e04e7"
+DIAR_ENGINE_SIZE = 27350358
+DIAR_ENGINE_FILES = (
+    "sherpa-onnx-offline-speaker-diarization.exe",
+    "onnxruntime.dll",
+    "onnxruntime_providers_shared.dll",
+    "sherpa-onnx-c-api.dll",
+    "sherpa-onnx-cxx-api.dll",
+)
+DIAR_SEG_URL = ("https://github.com/k2-fsa/sherpa-onnx/releases/download/"
+                "speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2")
+DIAR_SEG_SHA = "24615ee884c897d9d2ba09bb4d30da6bb1b15e685065962db5b02e76e4996488"
+DIAR_SEG_SIZE = 6958444
+DIAR_EMB_URL = ("https://github.com/k2-fsa/sherpa-onnx/releases/download/"
+                "speaker-recongition-models/wespeaker_en_voxceleb_resnet34_LM.onnx")
+DIAR_EMB_SHA = "e9848563da86f263117134dfd7ad63c92355b37de492b55e325400c9d9c39012"
+DIAR_EMB_SIZE = 26530550
+DIAR_TOTAL_SIZE = DIAR_ENGINE_SIZE + DIAR_SEG_SIZE + DIAR_EMB_SIZE
+DIAR_PROGRESS_RE = re.compile(r"progress\s+([\d.]+)%")
+DIAR_LINE_RE = re.compile(r"^\s*([\d.]+)\s+--\s+([\d.]+)\s+speaker_(\d+)\b")
+
+_SRT_TIME_RE = re.compile(r"(\d{1,2}):(\d{2}):(\d{2})[,.](\d{3})")
+_SPEAKER_PREFIX_RE = re.compile(r"^\[([^\[\]\n]{1,40})\]\s+(.*)$", re.S)
+_TXT_TS_PREFIX_RE = re.compile(r"^\[(\d{1,2}:)?(\d{1,2}):(\d{2})\]\s+(.*)$")
+
+
+def format_timestamp(sec: float | None) -> str:
+    if sec is None or sec < 0:
+        return ""
+    s = int(round(sec))
+    h, rem = divmod(s, 3600)
+    m, x = divmod(rem, 60)
+    return f"{h}:{m:02d}:{x:02d}" if h else f"{m:02d}:{x:02d}"
+
+
+def format_srt_time(sec: float) -> str:
+    ms_total = max(0, int(round(sec * 1000)))
+    s_total, ms = divmod(ms_total, 1000)
+    m_total, s = divmod(s_total, 60)
+    h, m = divmod(m_total, 60)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def _parse_srt_ts(token: str) -> float | None:
+    m = _SRT_TIME_RE.search(token or "")
+    if not m:
+        return None
+    h, mn, sc, ms = (int(x) for x in m.groups())
+    return h * 3600 + mn * 60 + sc + ms / 1000.0
+
+
+def parse_srt(text: str) -> list[dict]:
+    """Legge un file .srt in segmenti [{start, end, speaker, text}]."""
+    out = []
+    blocks = re.split(r"\r?\n\s*\r?\n", (text or "").strip())
+    for blk in blocks:
+        lines = [l.rstrip("\r") for l in blk.splitlines() if l.strip()]
+        if not lines:
+            continue
+        ts_idx = next((i for i, l in enumerate(lines) if "-->" in l), None)
+        if ts_idx is None:
+            continue
+        parts = lines[ts_idx].split("-->", 1)
+        start, end = _parse_srt_ts(parts[0]), _parse_srt_ts(parts[1])
+        if start is None or end is None:
+            continue
+        body = " ".join(l.strip() for l in lines[ts_idx + 1:] if l.strip())
+        if not body:
+            continue
+        speaker = ""
+        sm = _SPEAKER_PREFIX_RE.match(body)
+        if sm:
+            speaker, body = sm.group(1).strip(), sm.group(2).strip()
+        out.append({"start": start, "end": end, "speaker": speaker, "text": body})
+    return out
+
+
+def parse_plain_txt(text: str) -> list[dict]:
+    """Fallback per file .txt privi del corrispondente .srt."""
+    out = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        start = None
+        tm = _TXT_TS_PREFIX_RE.match(line)
+        if tm:
+            h = int(tm.group(1)[:-1]) if tm.group(1) else 0
+            start = h * 3600 + int(tm.group(2)) * 60 + int(tm.group(3))
+            line = tm.group(4).strip()
+        speaker = ""
+        sm = _SPEAKER_PREFIX_RE.match(line)
+        if sm:
+            speaker, line = sm.group(1).strip(), sm.group(2).strip()
+        if line:
+            out.append({"start": start, "end": None, "speaker": speaker, "text": line})
+    return out
+
+
+def assign_speakers(segments: list[dict], turns: list[tuple[float, float, int]]) -> list[dict]:
+    """Assegna Interlocutore 1, 2... a ogni segmento SRT usando la massima sovrapposizione."""
+    if not turns:
+        return [dict(seg) for seg in segments]
+    label_map = {}
+    out = []
+    for seg in segments:
+        s0, s1 = float(seg["start"]), float(seg["end"])
+        overlaps = {}
+        for t0, t1, spk in turns:
+            ov = min(s1, t1) - max(s0, t0)
+            if ov > 0:
+                overlaps[spk] = overlaps.get(spk, 0.0) + ov
+        chosen = None
+        if overlaps:
+            chosen = max(overlaps.items(), key=lambda kv: kv[1])[0]
+        else:
+            best_dist = 2.51
+            for t0, t1, spk in turns:
+                dist = max(0.0, t0 - s1, s0 - t1)
+                if dist < best_dist:
+                    best_dist = dist
+                    chosen = spk
+        speaker = ""
+        if chosen is not None:
+            if chosen not in label_map:
+                label_map[chosen] = f"Interlocutore {len(label_map) + 1}"
+            speaker = label_map[chosen]
+        out.append({**seg, "speaker": speaker})
+    return out
+
+
+def apply_speaker_map(segments: list[dict], speaker_map: dict | None) -> list[dict]:
+    if not isinstance(speaker_map, dict) or not speaker_map:
+        return [dict(s) for s in segments]
+    clean_map = {str(k): str(v).strip()[:40] for k, v in speaker_map.items() if isinstance(v, str) and v.strip()}
+    return [{**s, "speaker": clean_map.get(s.get("speaker") or "", s.get("speaker") or "")} for s in segments]
+
+
+def format_txt(segments: list[dict], timestamps: bool = False, speakers: bool = True) -> str:
+    has_speakers = speakers and any(s.get("speaker") for s in segments)
+    if not segments:
+        return ""
+    if not timestamps and has_speakers:
+        groups = []
+        for s in segments:
+            spk = s.get("speaker") or ""
+            txt = (s.get("text") or "").strip()
+            if not txt:
+                continue
+            if groups and groups[-1][0] == spk:
+                groups[-1][1].append(txt)
+            else:
+                groups.append([spk, [txt]])
+        lines = [f"[{spk}] {' '.join(parts)}" if spk else " ".join(parts) for spk, parts in groups]
+        return "\n\n".join(lines) + "\n"
+
+    lines = []
+    for s in segments:
+        txt = (s.get("text") or "").strip()
+        if not txt:
+            continue
+        parts = []
+        if timestamps and s.get("start") is not None:
+            parts.append(f"[{format_timestamp(s['start'])}]")
+        if has_speakers and s.get("speaker"):
+            parts.append(f"[{s['speaker']}]")
+        parts.append(txt)
+        lines.append(" ".join(parts))
+    return ("\n".join(lines) + "\n") if lines else ""
+
+
+def format_srt(segments: list[dict], include_speakers: bool = True) -> str:
+    blocks = []
+    idx = 1
+    for s in segments:
+        if s.get("start") is None or s.get("end") is None:
+            continue
+        txt = (s.get("text") or "").strip()
+        if not txt:
+            continue
+        prefix = f"[{s['speaker']}] " if include_speakers and s.get("speaker") else ""
+        blocks.append(f"{idx}\n{format_srt_time(float(s['start']))} --> {format_srt_time(float(s['end']))}\n{prefix}{txt}")
+        idx += 1
+    return ("\n\n".join(blocks) + "\n") if blocks else ""

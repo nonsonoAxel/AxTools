@@ -4,8 +4,8 @@ __pycache__/
 *.pyc
 
 # l'EXE si pubblica nelle Releases, non nel codice
-AxGrab.exe
-AxGrab.exe.sig
+AxTools.exe
+AxTools.exe.sig
 build/
 dist/
 *.spec

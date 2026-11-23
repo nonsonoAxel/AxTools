@@ -6,15 +6,16 @@
 <!-- limita ciò che la pagina può contattare: solo se stessa, più le miniature (immagini https).
      'unsafe-inline' e 'unsafe-eval' servono a pywebview per il ponte verso Python -->
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
-<title>AxGrab</title>
+<title>AxTools</title>
 <style>
 :root{
   --bg:#0f0f11; --side:#0b0b0d; --s1:#141417; --s2:#1a1a1e; --s3:#222227;
   --line:#232328; --line-2:#2e2e35;
   --glass:#151518; --glass-2:#1d1d21; --glass-line:#26262b;
-  /* testo */
+  /* testo e accenti */
   --text:#e8e6ea; --muted:#9a97a0; --dim:#6b6872;
   --accent:#7457f0; --accent-2:#a594f9;
+  --c-video:#a594f9; --c-audio:#38bdf8; --c-image:#f472b6; --c-text:#34d399; --c-amber:#fbbf24; --c-orange:#fb923c;
   --ok:#3fb97f; --err:#e5484d; --warn:#e2a336;
   --r:10px;
   --mono:"Cascadia Mono","Cascadia Code",Consolas,monospace;
@@ -28,7 +29,7 @@ button{font:inherit;color:inherit}
 svg{display:block}
 
 /* ---------- barra del titolo ---------- */
-.titlebar{height:38px;display:flex;align-items:center;background:var(--side);
+.titlebar{height:38px;display:flex;align-items:center;background:linear-gradient(90deg,rgba(116,87,240,.11),var(--side) 36%);
   border-bottom:1px solid var(--glass-line);position:relative;z-index:5}
 .tb-drag{flex:1;height:100%;display:flex;align-items:center;gap:9px;padding-left:14px}
 .mark{height:15px;width:auto;display:block;flex:none}
@@ -53,16 +54,24 @@ body.maxed .rz{display:none}
 
 /* ---------- layout ---------- */
 .app{display:grid;grid-template-columns:208px 1fr;height:calc(100% - 38px)}
-.side{background:var(--side);border-right:1px solid var(--glass-line);padding:16px 12px;
+.side{background:linear-gradient(180deg,rgba(116,87,240,.08) 0%,var(--side) 180px);border-right:1px solid var(--glass-line);padding:16px 12px;
   display:flex;flex-direction:column;gap:2px}
 .nav{display:flex;align-items:center;gap:10px;height:36px;padding:0 10px;border-radius:9px;position:relative;color:var(--muted);
   cursor:pointer;font-weight:500;transition:background .12s,color .12s}
-.nav svg{width:16px;height:16px;flex:none;stroke-width:1.75}
+.nav[data-view="download"]{--nav-c:var(--c-video)}
+.nav[data-view="convert"]{--nav-c:var(--c-audio)}
+.nav[data-view="transcribe"]{--nav-c:var(--c-text)}
+.nav[data-view="history"]{--nav-c:var(--c-amber)}
+.nav[data-view="settings"]{--nav-c:#c084fc}
+.nav svg{width:16px;height:16px;flex:none;stroke-width:1.75;color:color-mix(in srgb,var(--nav-c,var(--muted)) 62%,var(--muted));transition:color .14s}
 .nav:hover{background:var(--glass);color:var(--text)}
-.nav.active{background:color-mix(in srgb,var(--accent) 16%,var(--glass));box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--accent) 32%,transparent);color:#fff}
-.nav.active svg{color:var(--accent-2)}
-.nav.active::before{content:"";position:absolute;left:-12px;top:10px;bottom:10px;width:2px;background:var(--accent)}
-.nav .count{margin-left:auto;font-size:11px;font-weight:600;color:#fff;background:var(--accent);border-radius:10px;padding:0 7px;line-height:18px}
+.nav:hover svg{color:var(--nav-c,var(--text))}
+.nav.active{background:linear-gradient(90deg,color-mix(in srgb,var(--nav-c,var(--accent)) 18%,var(--glass)),color-mix(in srgb,var(--accent) 10%,var(--glass)));
+  box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--nav-c,var(--accent)) 36%,transparent);color:#fff}
+.nav.active svg{color:var(--nav-c,var(--accent-2))}
+.nav.active::before{content:"";position:absolute;left:-12px;top:9px;bottom:9px;width:3px;border-radius:0 2px 2px 0;
+  background:var(--nav-c,var(--accent));box-shadow:0 0 10px var(--nav-c,var(--accent))}
+.nav .count{margin-left:auto;font-size:11px;font-weight:700;color:#0b0b0d;background:var(--nav-c,var(--accent));border-radius:10px;padding:0 7px;line-height:18px}
 .side-foot{margin-top:auto;padding:10px;border-top:1px solid var(--glass-line);font-size:11.5px;color:var(--dim);line-height:1.6}
 .side-foot .row{display:flex;align-items:center;gap:7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .side-foot .side-folder{width:calc(100% + 12px);border:none;background:none;padding:4px 6px;margin:3px -6px -4px;border-radius:6px;text-align:left;cursor:pointer;color:var(--dim);transition:background .12s,color .12s}
@@ -72,13 +81,16 @@ body.maxed .rz{display:none}
 .side-foot .side-folder span{overflow:hidden;text-overflow:ellipsis}
 .dot{width:6px;height:6px;border-radius:50%;background:var(--ok);flex:none}
 
-main{overflow-y:auto;padding:30px 40px 40px}
+main{overflow-y:auto;padding:30px 40px 40px;
+  background:radial-gradient(640px 260px at 20% 0%,rgba(116,87,240,.11),transparent 72%),radial-gradient(460px 220px at 85% 4%,rgba(56,189,248,.06),transparent 70%)}
 main::-webkit-scrollbar{width:10px}
 main::-webkit-scrollbar-thumb{background:rgba(255,255,255,.1);border-radius:10px;border:3px solid transparent;background-clip:padding-box}
 .view{display:none;max-width:860px;margin:0 auto}
 .view.active{display:block;animation:fadeInUp .15s cubic-bezier(.16,1,.3,1)}
 h1{font-family:"Segoe UI Variable Display","Segoe UI",system-ui,sans-serif;font-size:26px;font-weight:650;letter-spacing:-.5px}
-h1 .g{color:var(--muted)}
+h1 .g{background:linear-gradient(115deg,#c4b5fd 10%,var(--accent-2) 55%,#7dd3fc 100%);-webkit-background-clip:text;background-clip:text;color:transparent}
+#view-convert h1 .g{background:linear-gradient(115deg,#67e8f9 0%,var(--c-audio) 52%,var(--accent-2) 100%);-webkit-background-clip:text;background-clip:text;color:transparent}
+#view-transcribe h1 .g{background:linear-gradient(115deg,#6ee7b7 0%,var(--c-text) 52%,var(--accent-2) 100%);-webkit-background-clip:text;background-clip:text;color:transparent}
 .sub{color:var(--muted);margin:6px 0 16px}
 .sites{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 22px}
 .chip-site{font-size:11.5px;color:var(--muted);height:24px;padding:0 9px;border-radius:8px;background:rgba(255,255,255,.02);border:1px solid rgba(255,255,255,.04);display:flex;align-items:center;gap:6px;transition:background .14s,border-color .14s,color .14s}
@@ -92,8 +104,8 @@ h1 .g{color:var(--muted)}
 .btn svg{width:15px;height:15px;stroke-width:1.9}
 .btn:hover{background:#26262b;border-color:#33333a}
 .btn:active{transform:translateY(1px)}
-.btn.primary{background:var(--accent);border-color:color-mix(in srgb,#fff 16%,var(--accent));color:#fff;font-weight:600;box-shadow:inset 0 1px 0 rgba(255,255,255,.22),0 2px 6px rgba(116,87,240,.28)}
-.btn.primary:hover{background:#8166f4;border-color:color-mix(in srgb,#fff 24%,#8166f4)}
+.btn.primary{background:linear-gradient(135deg,#8366ff,var(--accent) 55%,#5f41e8);border-color:color-mix(in srgb,#fff 18%,var(--accent));color:#fff;font-weight:600;box-shadow:inset 0 1px 0 rgba(255,255,255,.24),0 3px 10px rgba(116,87,240,.32)}
+.btn.primary:hover{background:linear-gradient(135deg,#8e74ff,#8166f4 55%,#6b4ef2);border-color:color-mix(in srgb,#fff 26%,#8166f4)}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .btn.danger{background:none;border-color:color-mix(in srgb,var(--err) 45%,transparent);color:#ff8d8f}
 .btn.danger:hover{background:color-mix(in srgb,var(--err) 12%,transparent)}
@@ -128,8 +140,11 @@ kbd{font-family:var(--mono);font-size:10.5px;padding:1px 5px;border-radius:4px;b
 .seg button{border:none;background:none;color:var(--muted);height:28px;padding:0 11px;border-radius:7px;cursor:pointer;font-size:12.5px;font-weight:500;display:flex;align-items:center;gap:6px;transition:background .14s,color .14s,box-shadow .14s}
 .seg button svg{width:14px;height:14px;stroke-width:1.8}
 .seg button:hover:not(.on){color:var(--text)}
-.seg button.on{background:color-mix(in srgb,var(--accent) 22%,#24242c);color:#fff;box-shadow:0 1px 2px rgba(0,0,0,.42),inset 0 0 0 1px color-mix(in srgb,var(--accent) 42%,transparent),inset 0 1px 0 rgba(255,255,255,.1)}
-.seg button.on svg{color:var(--accent-2)}
+.seg button.on{--seg-c:var(--accent);background:color-mix(in srgb,var(--seg-c) 22%,#24242c);color:#fff;box-shadow:0 1px 2px rgba(0,0,0,.42),inset 0 0 0 1px color-mix(in srgb,var(--seg-c) 46%,transparent),inset 0 1px 0 rgba(255,255,255,.1)}
+.seg button.on svg{color:var(--seg-c)}
+#modeSeg button[data-v="audio"].on,#histFilterSeg button[data-f="audio"].on{--seg-c:var(--c-audio)}
+#modeSeg button[data-v="thumb"].on,#histFilterSeg button[data-f="image"].on{--seg-c:var(--c-image)}
+#modeSeg button[data-v="text"].on,#histFilterSeg button[data-f="text"].on{--seg-c:var(--c-text)}
 .seg.sm button{height:24px;padding:0 9px;font-size:12px;border-radius:6px}
 .seg.sm{border-radius:8px;padding:2px}
 
@@ -144,14 +159,24 @@ select:disabled{opacity:.4;cursor:default}
 
 .panel{background:var(--glass);border:1px solid var(--glass-line);border-radius:var(--r);box-shadow:inset 0 1px 0 rgba(255,255,255,.04),0 2px 8px rgba(0,0,0,.16)}
 .thumb{position:relative;aspect-ratio:16/9;border-radius:6px;overflow:hidden;background:#1a1a1f;flex:none;display:grid;place-items:center}
+.thumb.k-video{background:radial-gradient(circle at 30% 25%,rgba(116,87,240,.22),#17171d 72%)}
+.thumb.k-audio{background:radial-gradient(circle at 30% 25%,rgba(56,189,248,.22),#141920 72%)}
+.thumb.k-image{background:radial-gradient(circle at 30% 25%,rgba(244,114,182,.22),#1d161d 72%)}
+.thumb.k-text{background:radial-gradient(circle at 30% 25%,rgba(52,211,153,.22),#131c1a 72%)}
 .thumb::after{content:"";position:absolute;inset:0;border-radius:inherit;box-shadow:inset 0 0 0 1px rgba(255,255,255,.08);pointer-events:none;z-index:2}
 .thumb img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block;z-index:1}
-.thumb-ph{width:24px;height:24px;color:var(--dim);opacity:.65}
+.thumb-ph{width:24px;height:24px;color:var(--dim);opacity:.78}
+.thumb.k-video .thumb-ph{color:var(--c-video)} .thumb.k-audio .thumb-ph{color:var(--c-audio)}
+.thumb.k-image .thumb-ph{color:var(--c-image)} .thumb.k-text .thumb-ph{color:var(--c-text)}
 .thumb .dur{position:absolute;right:5px;bottom:5px;z-index:2;background:rgba(11,11,13,.82);backdrop-filter:blur(4px);font-family:var(--mono);font-size:11px;font-weight:600;padding:1px 6px;border-radius:4px;border:1px solid rgba(255,255,255,.08)}
 .site{display:inline-flex;align-items:center;gap:6px;color:var(--muted)}
 .site i{width:6px;height:6px;border-radius:50%}
 .site svg{width:13px;height:13px;flex:none}
 .tag{font-size:11px;font-weight:600;color:#bfb3ff;background:color-mix(in srgb,var(--accent) 13%,transparent);border:1px solid color-mix(in srgb,var(--accent) 32%,var(--line-2));border-radius:4px;padding:0 5px;line-height:17px}
+.tag.k-audio{color:#7dd3fc;background:color-mix(in srgb,var(--c-audio) 13%,transparent);border-color:color-mix(in srgb,var(--c-audio) 34%,var(--line-2))}
+.tag.k-image{color:#f9a8d4;background:color-mix(in srgb,var(--c-image) 13%,transparent);border-color:color-mix(in srgb,var(--c-image) 34%,var(--line-2))}
+.tag.k-text{color:#6ee7b7;background:color-mix(in srgb,var(--c-text) 13%,transparent);border-color:color-mix(in srgb,var(--c-text) 34%,var(--line-2))}
+.tag.k-clip{color:#fcd34d;background:color-mix(in srgb,var(--c-amber) 12%,transparent);border-color:color-mix(in srgb,var(--c-amber) 32%,var(--line-2))}
 
 /* ---------- avviso di aggiornamento ---------- */
 .update-banner{max-width:860px;margin:0 auto 22px;display:flex;align-items:center;gap:14px;padding:12px 14px;border-radius:var(--r);
@@ -233,20 +258,113 @@ select:disabled{opacity:.4;cursor:default}
 .status{font-weight:500;color:var(--text)}
 .list .job:hover{background:rgba(255,255,255,.02)}
 .job.done{cursor:pointer}
-.job.done .status,.job.error .status{padding:0 7px;border-radius:4px;line-height:17px}
+.job.done .status,.job.error .status,.job.converting .status,.job.transcribing .status,.job.diarizing .status{padding:0 7px;border-radius:4px;line-height:17px}
+.job.converting .status{background:rgba(56,189,248,.13);color:var(--c-audio)}
+.job.transcribing .status{background:rgba(52,211,153,.13);color:var(--c-text)}
+.job.diarizing .status{background:rgba(244,114,182,.14);color:var(--c-image)}
 .job.done .status{background:rgba(63,185,127,.12)}
 .job.error .status{background:rgba(229,72,77,.12)}
 .bar{height:4px;border-radius:2px;background:rgba(255,255,255,.07);overflow:hidden}
-.bar>i{display:block;height:100%;width:0;background:var(--accent);transition:width .25s ease}
+.bar>i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--accent),#9d85ff);transition:width .25s ease}
+.job.converting .bar>i{background:linear-gradient(90deg,var(--accent),var(--c-audio))}
+.job.transcribing .bar>i{background:linear-gradient(90deg,var(--accent),var(--c-text))}
+.job.diarizing .bar>i{background:linear-gradient(90deg,#a855f7,var(--c-image))}
 .job.processing .bar>i{width:100%!important;opacity:.55;animation:pulse 1.2s ease-in-out infinite}
+.job.converting.indet .bar>i{width:100%!important;opacity:.55;animation:pulse 1.2s ease-in-out infinite}
 @keyframes pulse{50%{opacity:.25}}
-.job.done .bar>i{background:var(--ok)} .job.done .status{color:var(--ok)}
+.job.done .bar>i{background:linear-gradient(90deg,#2da46e,var(--c-text))} .job.done .status{color:var(--ok)}
 .job.error .bar>i{background:var(--err);width:100%!important} .job.error .status{color:#ff8d8f}
 .job.cancelled{opacity:.5}
 .job-err{color:#ff8d8f;font-size:12px;margin-top:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .job-acts{display:flex;gap:4px}
 .empty{padding:40px;text-align:center;color:var(--dim);font-size:12.5px}
 .empty svg{width:30px;height:30px;margin:0 auto 10px;opacity:.5}
+
+/* ---------- ritaglio Da-A ---------- */
+.clip-wrap{border-top:1px solid var(--glass-line);padding:10px 16px;background:rgba(0,0,0,.08)}
+.clip-wrap[hidden]{display:none}
+.clip-toggle{border:none;background:none;color:var(--muted);font-size:12.5px;font-weight:500;display:inline-flex;align-items:center;gap:7px;cursor:pointer;padding:2px 0;transition:color .12s}
+.clip-toggle:hover,.clip-toggle.on{color:var(--c-amber)}
+.clip-toggle svg{width:14px;height:14px}
+.clip-box{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:10px}
+.clip-in{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 10px;border-radius:8px;background:var(--s1);border:1px solid var(--line-2);font-size:12px;color:var(--muted);transition:border-color .15s}
+.clip-in:focus-within{border-color:color-mix(in srgb,var(--c-amber) 65%,var(--line-2))}
+.clip-in input{width:68px;border:none;background:none;outline:none;color:var(--text);font-family:var(--mono);font-size:12.5px;text-align:center;user-select:text}
+.clip-check{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);cursor:pointer;margin-left:2px}
+.clip-check input{accent-color:var(--accent);cursor:pointer}
+.clip-dur{font-size:11.5px;color:var(--dim);margin-left:auto}
+
+/* ---------- converti e trascrivi ---------- */
+.drop-card{padding:16px 18px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+#view-convert .drop-card{border-color:color-mix(in srgb,var(--c-audio) 26%,var(--glass-line));background:linear-gradient(120deg,rgba(56,189,248,.07),var(--glass) 58%)}
+#view-transcribe .drop-card{border-color:color-mix(in srgb,var(--c-text) 26%,var(--glass-line));background:linear-gradient(120deg,rgba(52,211,153,.07),var(--glass) 58%)}
+.drop-ico{width:38px;height:38px;border-radius:10px;flex:none;display:grid;place-items:center;border:1px solid var(--glass-line);background:rgba(255,255,255,.04)}
+.drop-ico svg{width:19px;height:19px}
+#view-convert .drop-ico{color:var(--c-audio);background:rgba(56,189,248,.11);border-color:rgba(56,189,248,.28)}
+#view-transcribe .drop-ico{color:var(--c-text);background:rgba(52,211,153,.11);border-color:rgba(52,211,153,.28)}
+.drop-card .info{flex:1;min-width:200px}
+.drop-card .info b{display:block;font-size:14.5px;font-weight:600}
+.drop-card .info span{display:block;color:var(--muted);font-size:12px;margin-top:2px}
+.fmt-guide{margin-top:10px;overflow:hidden}
+.fmt-guide summary{list-style:none;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 14px;cursor:pointer;font-size:12.5px;font-weight:500;color:var(--muted);transition:background .12s,color .12s}
+.fmt-guide summary::-webkit-details-marker{display:none}
+.fmt-guide summary:hover{background:rgba(255,255,255,.025);color:var(--text)}
+.fmt-summary-l{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.fmt-guide .chev{width:14px;height:14px;flex:none;transition:transform .16s}
+.fmt-guide[open] .chev{transform:rotate(180deg)}
+.cat-pill{font-size:10.5px;font-weight:600;padding:1px 7px;border-radius:6px;letter-spacing:.1px}
+.cat-pill.v{color:#bfb3ff;background:rgba(165,148,249,.14);border:1px solid rgba(165,148,249,.28)}
+.cat-pill.a{color:#7dd3fc;background:rgba(56,189,248,.13);border:1px solid rgba(56,189,248,.28)}
+.cat-pill.i{color:#f9a8d4;background:rgba(244,114,182,.13);border:1px solid rgba(244,114,182,.28)}
+.fmt-grid{border-top:1px solid var(--glass-line);padding:10px 14px;display:flex;flex-direction:column;gap:8px;background:rgba(0,0,0,.14)}
+.fmt-row{display:flex;align-items:baseline;gap:10px;font-size:12px}
+.fmt-row .cat-pill{flex:none;min-width:68px;text-align:center}
+.fmt-txt{color:var(--muted);line-height:1.45}
+.fmt-txt b{color:var(--text);font-weight:500}
+.file-list{margin-top:12px;overflow:hidden}
+.file-item{display:flex;align-items:center;gap:12px;padding:10px 14px;border-top:1px solid var(--glass-line)}
+.file-item:first-child{border-top:none}
+.file-item > svg{width:18px;height:18px;flex:none;color:var(--accent-2)}
+.file-item .f-main{flex:1;min-width:0}
+.file-item .f-name{font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.file-item .f-meta{display:flex;align-items:center;gap:8px;color:var(--dim);font-size:11.5px;margin-top:3px;flex-wrap:wrap}
+.conv-controls{padding:12px 16px;border-top:1px solid var(--glass-line);background:rgba(0,0,0,.14);display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.conv-field{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;color:var(--muted)}
+.tr-bar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+.model-pill{display:inline-flex;align-items:center;gap:8px;height:30px;padding:0 11px;border-radius:8px;background:var(--glass);border:1px solid color-mix(in srgb,var(--c-text) 28%,var(--glass-line));font-size:12px;color:var(--muted)}
+.model-pill b{color:var(--text);font-weight:600}
+.model-pill a{color:var(--c-text);cursor:pointer;text-decoration:none;font-weight:500}
+.model-pill a:hover{text-decoration:underline}
+.tr-link-row{margin-top:12px;display:flex;gap:8px;align-items:center;padding:6px 8px;border-radius:12px;background:var(--glass);border:1px solid var(--glass-line);transition:border-color .15s}
+.tr-link-row:focus-within{border-color:color-mix(in srgb,var(--c-text) 60%,var(--line-2))}
+.tr-link-row input{flex:1;min-width:0;border:none;background:none;outline:none;color:var(--text);font:inherit;font-size:13.5px;padding:4px 6px;user-select:text}
+.tr-link-row input::placeholder{color:var(--dim)}
+
+/* ---------- lettore trascrizioni ---------- */
+.modal.reader{width:min(760px,calc(100% - 32px));max-height:calc(100% - 36px);display:flex;flex-direction:column;gap:12px;padding:20px}
+.reader-head{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.reader-head h3{margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.reader-tools{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding-bottom:10px;border-bottom:1px solid var(--glass-line)}
+.reader-speakers{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.spk-chip{--sp-c:var(--accent-2);display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 9px;border-radius:7px;background:color-mix(in srgb,var(--sp-c) 14%,var(--glass-2));border:1px solid color-mix(in srgb,var(--sp-c) 38%,var(--line-2));font-size:12px;color:var(--text)}
+.spk-chip span{color:var(--sp-c);font-size:11.5px;font-weight:500}
+.spk-chip input{width:112px;border:none;background:none;outline:none;color:var(--text);font:inherit;font-size:12px;font-weight:500;user-select:text}
+.spk-chip[data-si="0"],.seg-spk[data-si="0"]{--sp-c:#a594f9}
+.spk-chip[data-si="1"],.seg-spk[data-si="1"]{--sp-c:#38bdf8}
+.spk-chip[data-si="2"],.seg-spk[data-si="2"]{--sp-c:#34d399}
+.spk-chip[data-si="3"],.seg-spk[data-si="3"]{--sp-c:#f472b6}
+.spk-chip[data-si="4"],.seg-spk[data-si="4"]{--sp-c:#fbbf24}
+.spk-chip[data-si="5"],.seg-spk[data-si="5"]{--sp-c:#fb923c}
+.reader-body{flex:1;min-height:220px;max-height:420px;overflow-y:auto;padding:4px 2px;display:flex;flex-direction:column;gap:8px;user-select:text}
+.reader-body::-webkit-scrollbar{width:8px}
+.reader-body::-webkit-scrollbar-thumb{background:rgba(255,255,255,.12);border-radius:8px}
+.seg-line{display:flex;gap:10px;align-items:flex-start;padding:7px 10px;border-radius:8px;background:rgba(255,255,255,.02);border:1px solid transparent;line-height:1.5}
+.seg-line:hover{border-color:var(--glass-line);background:rgba(255,255,255,.03)}
+.seg-ts{font-family:var(--mono);font-size:11.5px;color:var(--dim);flex:none;padding-top:2px}
+.seg-spk{--sp-c:var(--accent-2);display:inline-block;margin-right:7px;font-size:11.5px;font-weight:600;color:var(--sp-c);background:color-mix(in srgb,var(--sp-c) 15%,transparent);padding:1px 7px;border-radius:5px;white-space:nowrap}
+.seg-txt{flex:1;min-width:0;color:var(--text);font-size:13.5px}
+.seg-txt mark{background:color-mix(in srgb,var(--accent) 45%,transparent);color:#fff;border-radius:3px;padding:0 2px}
+.reader-foot{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;padding-top:8px;border-top:1px solid var(--glass-line)}
 
 /* ---------- cronologia ---------- */
 .hist-bar{flex-wrap:wrap}
@@ -320,7 +438,7 @@ select:disabled{opacity:.4;cursor:default}
 <header class="titlebar">
   <div class="tb-drag" id="drag">
     <img class="mark" src="logo.png" alt="" draggable="false">
-    <span class="tb-name">AxGrab</span>
+    <span class="tb-name">AxTools</span>
   </div>
   <div class="wc">
     <button id="wcMin" title="Riduci a icona"><svg viewBox="0 0 10 10"><path d="M0 5h10" stroke="currentColor"/></svg></button>
@@ -333,6 +451,12 @@ select:disabled{opacity:.4;cursor:default}
   <aside class="side">
     <div class="nav active" data-view="download">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 20h14"/></svg>Scarica<span class="count" id="activeCount" hidden>0</span>
+    </div>
+    <div class="nav" data-view="convert">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3l4 4-4 4"/><path d="M3 11V9a2 2 0 0 1 2-2h16"/><path d="M7 21l-4-4 4-4"/><path d="M21 13v2a2 2 0 0 1-2 2H3"/></svg>Converti<span class="count" id="convertCount" hidden>0</span>
+    </div>
+    <div class="nav" data-view="transcribe">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M8 21h8"/></svg>Trascrivi<span class="count" id="transcribeCount" hidden>0</span>
     </div>
     <div class="nav" data-view="history">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>Cronologia
@@ -382,6 +506,15 @@ select:disabled{opacity:.4;cursor:default}
             </div>
           </div>
         </div>
+        <div class="clip-wrap" id="clipWrap">
+          <button type="button" class="clip-toggle" id="clipToggle"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M20 4 8.12 15.88M14.47 14.48 20 20M8.12 8.12 12 12"/></svg><span>Ritaglia intervallo</span></button>
+          <div class="clip-box" id="clipBox" hidden>
+            <label class="clip-in"><span>Da</span><input id="clipStart" placeholder="0:00" spellcheck="false"></label>
+            <label class="clip-in"><span>A</span><input id="clipEnd" placeholder="fine" spellcheck="false"></label>
+            <label class="clip-check" title="Salta la ricodifica al secondo esatto: molto più veloce su clip lunghe, ma taglia al keyframe più vicino"><input type="checkbox" id="clipFast">Taglio rapido</label>
+            <span class="clip-dur" id="clipDur"></span>
+          </div>
+        </div>
         <div class="opts">
           <div class="seg" id="modeSeg">
             <button data-v="video"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="13" height="12" rx="2"/><path d="m16 10.5 5-3v9l-5-3"/></svg>Video</button>
@@ -409,10 +542,115 @@ select:disabled{opacity:.4;cursor:default}
       <div class="panel list" id="queue"></div>
     </section>
 
+    <!-- CONVERTI -->
+    <section class="view" id="view-convert">
+      <h1>Converti <span class="g">qualsiasi file</span></h1>
+      <p class="sub">Video, audio e immagini elaborati sul tuo PC senza inviare nulla online.</p>
+      <div class="panel drop-card">
+        <div class="drop-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3l4 4-4 4"/><path d="M3 11V9a2 2 0 0 1 2-2h16"/><path d="M7 21l-4-4 4-4"/><path d="M21 13v2a2 2 0 0 1-2 2H3"/></svg></div>
+        <div class="info">
+          <b>Seleziona file da convertire</b>
+          <span>Elaborazione offline sul tuo PC, anche più file insieme.</span>
+        </div>
+        <button class="btn primary" id="convPickBtn">Scegli file…</button>
+      </div>
+      <details class="panel fmt-guide">
+        <summary>
+          <span class="fmt-summary-l">Formati supportati
+            <span class="cat-pill v">Video</span>
+            <span class="cat-pill a">Audio</span>
+            <span class="cat-pill i">Immagini</span>
+          </span>
+          <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+        </summary>
+        <div class="fmt-grid">
+          <div class="fmt-row"><span class="cat-pill v">Video</span><span class="fmt-txt"><b>Ingresso:</b> MP4, MKV, WEBM, MOV, AVI, FLV, TS, M4V, 3GP, WMV · <b>Uscita:</b> MP4, MKV, WEBM, MOV, GIF, MP3, M4A, WAV</span></div>
+          <div class="fmt-row"><span class="cat-pill a">Audio</span><span class="fmt-txt"><b>Ingresso:</b> MP3, M4A, WAV, FLAC, OGG, OPUS, AAC, WMA, AIFF · <b>Uscita:</b> MP3, M4A, WAV, FLAC, OGG, OPUS</span></div>
+          <div class="fmt-row"><span class="cat-pill i">Immagini</span><span class="fmt-txt"><b>Ingresso:</b> PNG, JPG, WEBP, ICO, BMP, TIFF · <b>Uscita:</b> PNG, JPG, WEBP, ICO, BMP</span></div>
+        </div>
+      </details>
+      <div class="panel file-list" id="convFilesWrap" hidden>
+        <div id="convFiles"></div>
+        <div class="conv-controls">
+          <label class="conv-field">Formato <select id="convFmt"></select></label>
+          <label class="conv-field" id="convPresetWrap">Qualità <select id="convPreset"></select></label>
+          <label class="conv-field" id="convImgResizeWrap" hidden>Dimensione <select id="convImgResize"><option value="0">Originale</option><option value="1920">Max 1920 px</option><option value="1080">Max 1080 px</option><option value="512">Max 512 px</option></select></label>
+          <button type="button" class="dest-chip" id="convDestChip" title="Cambia dove salvare i file convertiti"></button>
+          <div style="flex:1"></div>
+          <button class="btn primary" id="convStartBtn">Converti</button>
+        </div>
+      </div>
+      <div class="sec">
+        <h2>Conversioni <span id="convertQueueInfo"></span></h2>
+        <div class="acts">
+          <button class="btn sm" id="convOpenFolderBtn">Apri cartella</button>
+          <button class="btn sm" id="convClearBtn">Rimuovi completati</button>
+        </div>
+      </div>
+      <div class="panel list" id="convertQueue"></div>
+    </section>
+
+    <!-- TRASCRIVI -->
+    <section class="view" id="view-transcribe">
+      <div class="tr-bar">
+        <div>
+          <h1>Trascrivi <span class="g">audio e video</span></h1>
+          <p class="sub" style="margin-bottom:0">Tutto offline sul tuo PC: genera testo (.txt) e sottotitoli (.srt) leggibili qui dentro.</p>
+        </div>
+        <div class="model-pill" id="trModelPill"><span id="trModelLbl">Nessun modello</span> · <a id="trModelGo">cambia</a></div>
+      </div>
+      <div class="panel drop-card">
+        <div class="drop-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M8 21h8"/></svg></div>
+        <div class="info">
+          <b>Scegli audio o video dal PC</b>
+          <span>Più file insieme (MP3, M4A, WAV, MP4, MKV, MOV, WEBM…).</span>
+        </div>
+        <button class="btn primary" id="trPickBtn">Scegli file…</button>
+      </div>
+      <div class="tr-link-row">
+        <input id="trUrl" placeholder="Oppure incolla un link (YouTube, Instagram, TikTok…) e premi Invio" spellcheck="false">
+        <button class="btn sm" id="trUrlBtn">Trascrivi link</button>
+      </div>
+      <div class="panel file-list" id="trFilesWrap" hidden>
+        <div id="trFiles"></div>
+        <div class="conv-controls">
+          <span class="conv-field" id="trFilesCount"></span>
+          <div style="flex:1"></div>
+          <button class="btn primary" id="trStartFilesBtn">Trascrivi selezionati</button>
+        </div>
+      </div>
+      <div class="panel tr-opts">
+        <div class="row">
+          <div class="lbl"><b>Timestamp nel file .txt</b><span>Inserisce il minuto accanto a ogni frase (es. <code style="font-family:var(--mono)">[01:24]</code>).</span></div>
+          <div class="toggle" id="setTrTimestamps"></div>
+        </div>
+        <div class="row">
+          <div class="lbl"><b>Dividi interlocutori</b><span id="trDiarizeHint">Riconosce automaticamente chi parla (<code style="font-family:var(--mono)">Interlocutore 1</code>, <code style="font-family:var(--mono)">2</code>…). Funziona in italiano e qualsiasi lingua.</span></div>
+          <div class="toggle" id="setTrDiarize"></div>
+        </div>
+        <div class="row" id="trSpeakersRow" hidden>
+          <div class="lbl"><b>Numero di persone</b><span>Lascia "Automatico" se non sai quante voci ci sono.</span></div>
+          <select id="setTrSpeakers"><option value="0">Automatico</option><option value="2">2 persone</option><option value="3">3 persone</option><option value="4">4 persone</option><option value="5">5 persone</option><option value="6">6 persone</option></select>
+        </div>
+        <div class="row">
+          <div class="lbl"><b>Lingua dell'audio</b><span>Scegliere la lingua rende il riconoscimento più preciso.</span></div>
+          <select id="setTrLang"><option value="auto">Automatica</option><option value="it">Italiano</option><option value="en">Inglese</option><option value="es">Spagnolo</option><option value="fr">Francese</option><option value="de">Tedesco</option><option value="pt">Portoghese</option></select>
+        </div>
+      </div>
+      <div class="sec">
+        <h2>Trascrizioni <span id="transcribeQueueInfo"></span></h2>
+        <div class="acts">
+          <button class="btn sm" id="trOpenFolderBtn">Apri cartella</button>
+          <button class="btn sm" id="trClearBtn">Rimuovi completati</button>
+        </div>
+      </div>
+      <div class="panel list" id="transcribeQueue"></div>
+    </section>
+
     <!-- CRONOLOGIA -->
     <section class="view" id="view-history">
       <h1>Cronologia</h1>
-      <p class="sub">I file scaricati, con link per aprirli o scaricarli di nuovo.</p>
+      <p class="sub">I file scaricati, convertiti e trascritti, con link per aprirli o leggerli.</p>
       <div class="sec hist-bar" style="margin-top:0">
         <div class="hist-bar-l">
           <div class="search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="histSearch" placeholder="Cerca per titolo"></div>
@@ -420,6 +658,7 @@ select:disabled{opacity:.4;cursor:default}
             <button data-f="all" class="on">Tutti</button>
             <button data-f="video">Video</button>
             <button data-f="audio">Audio</button>
+            <button data-f="image">Immagini</button>
             <button data-f="text">Testo</button>
           </div>
         </div>
@@ -478,7 +717,7 @@ select:disabled{opacity:.4;cursor:default}
       <div class="group-label" id="trascrizione">Trascrizione (Whisper)</div>
       <div class="panel">
         <div class="row">
-          <div class="lbl"><b>Audio in testo, direttamente sul tuo PC</b><span>Con la modalità <b style="display:inline;font-weight:600">Testo</b> o con "Trascrivi un file…" AxGrab scrive tutto quello che si dice in un .txt e in sottotitoli .srt. Niente viene inviato online. Serve un modello, che si scarica una volta sola: scegli quello giusto qui sotto. Chi non usa la trascrizione non scarica nulla.</span><span id="whisperStatus" class="w-status"></span></div>
+          <div class="lbl"><b>Audio in testo, direttamente sul tuo PC</b><span>Con la modalità <b style="display:inline;font-weight:600">Testo</b> o dalla scheda Trascrivi, AxTools scrive tutto quello che si dice in un .txt e in sottotitoli .srt. Niente viene inviato online. Serve un modello, che si scarica una volta sola: scegli quello giusto qui sotto. Chi non usa la trascrizione non scarica nulla.</span><span id="whisperStatus" class="w-status"></span></div>
         </div>
         <div class="row">
           <div class="lbl"><b>Lingua dell'audio</b><span>"Automatica" la riconosce da sola; sceglierla rende la trascrizione un po' più affidabile.</span></div>
@@ -488,11 +727,15 @@ select:disabled{opacity:.4;cursor:default}
           <div class="lbl"><b>Usa la scheda NVIDIA</b><span id="gpuText"></span><div id="gpuProgress"></div></div>
           <div style="display:flex;gap:6px;align-items:center"><button class="btn sm danger" id="gpuDeleteBtn" hidden>Elimina</button><div class="toggle" id="setGpu"></div></div>
         </div>
+        <div class="row" id="diarRow">
+          <div class="lbl"><b>Separazione interlocutori (sherpa-onnx)</b><span id="diarText"></span><div id="diarProgress"></div></div>
+          <div style="display:flex;gap:6px;align-items:center"><button class="btn sm danger" id="diarDeleteBtn" hidden>Elimina</button><div class="toggle" id="setDiar"></div></div>
+        </div>
       </div>
       <div class="models" id="models"></div>
       <div class="panel" style="margin-top:12px">
         <div class="row">
-          <div class="lbl"><b>Modelli già sul PC</b><span>Se un'altra app (es. Easy Whisper) ha già scaricato un modello, AxGrab lo riconosce dall'impronta e lo usa senza riscaricarlo. I file incompleti o modificati vengono segnalati e mai usati.</span></div>
+          <div class="lbl"><b>Modelli già sul PC</b><span>Se un'altra app (es. Easy Whisper) ha già scaricato un modello, AxTools lo riconosce dall'impronta e lo usa senza riscaricarlo. I file incompleti o modificati vengono segnalati e mai usati.</span></div>
           <button class="btn sm" id="scanModelsBtn">Cerca</button>
         </div>
         <div id="scanResults"></div>
@@ -501,7 +744,7 @@ select:disabled{opacity:.4;cursor:default}
       <div class="group-label">Aggiornamenti</div>
       <div class="panel">
         <div class="row">
-          <div class="lbl"><b>AxGrab</b><span id="appVer">—</span></div>
+          <div class="lbl"><b>AxTools</b><span id="appVer">—</span></div>
           <button class="btn sm" id="checkAppBtn">Controlla aggiornamenti</button>
         </div>
         <div class="row">
@@ -514,16 +757,16 @@ select:disabled{opacity:.4;cursor:default}
       <div class="panel">
         <div class="row">
           <div class="lbl"><b>Dati dell'app</b><span>Componenti, impostazioni, cronologia e log · <span id="dataSize" style="display:inline;margin:0">—</span></span><span class="path" id="dataPath"></span></div>
-          <div style="display:flex;gap:6px"><button class="btn sm" id="openLogBtn" title="Il file axgrab.log contiene i tempi di ogni analisi: utile per capire cosa rallenta">Log</button><button class="btn sm" id="openDataBtn">Apri cartella</button></div>
+          <div style="display:flex;gap:6px"><button class="btn sm" id="openLogBtn" title="Il file axtools.log contiene i tempi di ogni analisi: utile per capire cosa rallenta">Log</button><button class="btn sm" id="openDataBtn">Apri cartella</button></div>
         </div>
         <div class="row">
-          <div class="lbl"><b>Disinstalla AxGrab</b><span>Rimuove i dati qui sopra, l'EXE e i suoi collegamenti. I video scaricati non vengono toccati.</span></div>
+          <div class="lbl"><b>Disinstalla AxTools</b><span>Rimuove i dati qui sopra, l'EXE e i suoi collegamenti. I video scaricati non vengono toccati.</span></div>
           <button class="btn sm danger" id="uninstallBtn">Disinstalla…</button>
         </div>
       </div>
 
-      <div class="about"><img src="logo.png" alt="AxGrab" draggable="false"><span>AxGrab <span id="aboutVer"></span> · creato da nonsonoAxel · basato su yt-dlp</span>
-        <a href="#" id="repoLink">github.com/nonsonoAxel/AxGrab</a></div>
+      <div class="about"><img src="logo.png" alt="AxTools" draggable="false"><span>AxTools <span id="aboutVer"></span> · creato da nonsonoAxel · basato su yt-dlp</span>
+        <a href="#" id="repoLink">github.com/nonsonoAxel/AxTools</a></div>
     </section>
   </main>
 </div>
@@ -540,7 +783,7 @@ select:disabled{opacity:.4;cursor:default}
 
 <div class="overlay" id="uninstall">
   <div class="panel modal">
-    <h3>Disinstallare AxGrab?</h3>
+    <h3>Disinstallare AxTools?</h3>
     <p>L'app si chiuderà e verranno eliminati definitivamente:</p>
     <ul>
       <li><b>Dati dell'app</b>: componenti, impostazioni, cronologia, log<br><span class="path" id="unPath" style="margin:2px 0 4px"></span></li>
@@ -564,6 +807,28 @@ select:disabled{opacity:.4;cursor:default}
     </div>
   </div>
 </div>
+<div class="overlay" id="readerOverlay">
+  <div class="panel modal reader" role="dialog" aria-modal="true" aria-labelledby="readerTitle">
+    <div class="reader-head">
+      <h3 id="readerTitle">Trascrizione</h3>
+      <button class="btn sm icon" id="readerClose" title="Chiudi"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M7 7l10 10M17 7 7 17"/></svg></button>
+    </div>
+    <div class="reader-tools">
+      <div class="search" style="width:220px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="readerSearch" placeholder="Cerca nella trascrizione"></div>
+      <label class="clip-check"><input type="checkbox" id="readerTsToggle">Mostra timestamp</label>
+      <div class="reader-speakers" id="readerSpeakers"></div>
+    </div>
+    <div class="reader-body" id="readerBody"></div>
+    <div class="reader-foot">
+      <span class="small" id="readerMeta"></span>
+      <div class="acts">
+        <button class="btn sm" id="readerFolderBtn">Mostra file</button>
+        <button class="btn sm" id="readerCopyBtn">Copia tutto</button>
+        <button class="btn sm primary" id="readerSaveBtn">Salva su file</button>
+      </div>
+    </div>
+  </div>
+</div>
 <div class="toasts" id="toasts"></div>
 
 <script>
@@ -576,6 +841,8 @@ const IC = {
   link:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>',
   web:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3.6 9h16.8M3.6 15h16.8M12 3a14 14 0 0 0 0 18M12 3a14 14 0 0 1 0 18"/></svg>',
   file:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4h8l5 5v11a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1z"/><path d="M14 4v5h5"/></svg>',
+  image:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="10" r="1.5"/><path d="m21 16-5-5-9 8"/></svg>',
+  read:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 11h16M4 16h10"/></svg>',
 };
 const SITES = [
   {k:"youtu",n:"YouTube",c:"#ff4e45",svg:'<svg viewBox="0 0 24 24" fill="#ff4e45"><path d="M23 12s0-3.85-.49-5.71a3 3 0 0 0-2.12-2.12C18.52 3.67 12 3.67 12 3.67s-6.52 0-8.39.5A3 3 0 0 0 1.49 6.29C1 8.15 1 12 1 12s0 3.85.49 5.71a3 3 0 0 0 2.12 2.12c1.87.5 8.39.5 8.39.5s6.52 0 8.39-.5a3 3 0 0 0 2.12-2.12C23 15.85 23 12 23 12zM9.75 15.5v-7l6.25 3.5-6.25 3.5z"/></svg>'},
@@ -608,6 +875,7 @@ const fmtBytes = b => { if(!b) return "0 B"; const u=["B","KB","MB","GB"]; let i
 const PH = {
   video:'<svg class="thumb-ph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m10 9.5 5 2.5-5 2.5z"/></svg>',
   audio:'<svg class="thumb-ph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V6l11-2v12"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="17.5" cy="16" r="2.5"/></svg>',
+  image:'<svg class="thumb-ph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="10" r="1.5"/><path d="m21 16-5-5-9 8"/></svg>',
   text:'<svg class="thumb-ph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4h9l4 4v12a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1z"/><path d="M14 4v5h5M8.5 13h7M8.5 17h4.5"/></svg>',
 };
 const thumbHTML = (src, dur, mode="video") => (PH[mode] || PH.video)
@@ -642,22 +910,70 @@ async function toggleMax(){
 }
 
 /* ---------- navigazione ---------- */
-document.querySelectorAll(".nav").forEach(n => n.onclick = () => {
-  document.querySelectorAll(".nav").forEach(x=>x.classList.toggle("active", x===n));
-  document.querySelectorAll(".view").forEach(v=>v.classList.toggle("active", v.id==="view-"+n.dataset.view));
-  if(n.dataset.view==="history") renderHistory();
-  if(n.dataset.view==="settings") loadDataInfo();
-});
+function goView(name){
+  document.querySelectorAll(".nav").forEach(x=>x.classList.toggle("active", x.dataset.view===name));
+  document.querySelectorAll(".view").forEach(v=>v.classList.toggle("active", v.id==="view-"+name));
+  if(name==="history") renderHistory();
+  if(name==="settings") loadDataInfo();
+  if(name==="transcribe") renderTranscribeTab();
+}
+document.querySelectorAll(".nav").forEach(n => n.onclick = () => goView(n.dataset.view));
 
-/* ---------- opzioni ---------- */
+/* ---------- ritaglio temporale e opzioni ---------- */
+function parseTimecodeJS(raw){
+  const s = String(raw || "").trim();
+  if(!s) return null;
+  const parts = s.split(":");
+  if(parts.length > 3 || !parts.every(p => /^\d+(?:\.\d+)?$/.test(p))) return NaN;
+  const nums = parts.map(Number);
+  if(nums.length > 1 && (nums[nums.length-1] >= 60 || (nums.length === 3 && nums[1] >= 60))) return NaN;
+  return nums.reduce((acc, v) => acc * 60 + v, 0);
+}
+function resetClip(){
+  $("#clipBox").hidden = true; $("#clipToggle").classList.remove("on");
+  $("#clipStart").value = ""; $("#clipEnd").value = ""; $("#clipFast").checked = false;
+  $("#clipDur").textContent = "";
+}
+function syncClipDur(){
+  const el = $("#clipDur");
+  if($("#clipBox").hidden){ el.textContent = ""; return true; }
+  const rs = $("#clipStart").value.trim(), re = $("#clipEnd").value.trim();
+  if(!rs && !re){ el.textContent = "Lascia vuoto Da o A per iniziare/finire ai bordi"; el.style.color = ""; return true; }
+  const cs = parseTimecodeJS(rs), ce = parseTimecodeJS(re);
+  if(Number.isNaN(cs) || Number.isNaN(ce)){
+    el.textContent = "Formato: min:sec (es. 1:30)"; el.style.color = "var(--err)"; return false;
+  }
+  const st = cs ?? 0;
+  if(ce !== null && ce <= st){
+    el.textContent = "La fine deve essere dopo l'inizio"; el.style.color = "var(--err)"; return false;
+  }
+  el.style.color = "";
+  const dur = current?.duration;
+  const endEff = ce !== null ? ce : (dur && dur > st ? dur : null);
+  el.textContent = endEff !== null ? `Durata: ${fmtDur(endEff - st)}` : `Da ${fmtDur(st)} alla fine`;
+  return true;
+}
+$("#clipToggle").onclick = () => {
+  const open = $("#clipBox").hidden;
+  $("#clipBox").hidden = !open;
+  $("#clipToggle").classList.toggle("on", open);
+  if(open) $("#clipEnd").placeholder = current?.duration ? fmtDur(current.duration) : "fine";
+  syncClipDur();
+};
+$("#clipStart").oninput = syncClipDur;
+$("#clipEnd").oninput = syncClipDur;
+
 const QUALS = [["best","Max"],["2160","4K"],["1440","1440p"],["1080","1080p"],["720","720p"],["480","480p"]];
 function renderOpts(){
   document.querySelectorAll("#modeSeg button").forEach(b=>b.classList.toggle("on", b.dataset.v===settings.mode));
+  const pvKind = settings.mode === "thumb" ? "image" : settings.mode === "audio" ? "audio" : settings.mode === "text" ? "text" : "video";
+  $("#pvThumb").className = "thumb k-" + pvKind;
   const qs = $("#qualitySeg"), hideQual = settings.mode === "thumb" || settings.mode === "text";
   qs.hidden = hideQual;
   $("#optsSep").hidden = hideQual;
   $("#thumbNote").hidden = settings.mode !== "thumb";
   $("#textNote").hidden = settings.mode !== "text";
+  $("#clipWrap").hidden = settings.mode === "thumb" || !!current?.playlist;
   if(settings.mode==="text"){
     qs.innerHTML = "";
     const m = currentModel();
@@ -685,13 +1001,13 @@ function renderOpts(){
   $("#dlBtn").textContent = settings.mode === "video" ? `Scarica · ${qLbl}`
     : settings.mode === "audio" ? `Scarica · ${(settings.audio_format || "m4a").toUpperCase()}`
     : settings.mode === "thumb" ? "Scarica JPG" : "Trascrivi";
+  syncClipDur();
 }
 $("#modeSeg").onclick = async e => {
   const b=e.target.closest("button"); if(!b) return;
   if(b.dataset.v === "text" && !currentModel()){
-    // prima volta: spiega la funzione invece di lasciare un pulsante che non funziona
     if(await ask("Trascrivere l'audio in testo",
-      "AxGrab può scrivere tutto quello che si dice in un video, in un .txt e in sottotitoli .srt, direttamente sul tuo PC. "
+      "AxTools può scrivere tutto quello che si dice in un video, in un .txt e in sottotitoli .srt, direttamente sul tuo PC. "
       + "Per farlo serve un modello di Whisper, che si scarica una volta sola (da 31 MB a 1 GB, lo scegli tu). Vuoi sceglierlo ora?",
       "Scegli il modello", false)) goModels();
     return;
@@ -700,7 +1016,7 @@ $("#modeSeg").onclick = async e => {
 };
 $("#textNote").onclick = e => { if(e.target.dataset.go) goModels(); };
 function goModels(){
-  document.querySelector('.nav[data-view="settings"]').click();
+  goView("settings");
   setTimeout(() => $("#trascrizione").scrollIntoView({behavior:"smooth", block:"start"}), 50);
 }
 $("#qualitySeg").onclick = e => { const b=e.target.closest("button"); if(!b) return; b.dataset.q ? save({quality:b.dataset.q}) : save({audio_format:b.dataset.a}); };
@@ -732,7 +1048,6 @@ function syncInput(){
 $("#url").addEventListener("input", syncInput);
 $("#url").addEventListener("keydown", e => { if(e.key==="Enter" && !e.shiftKey){ e.preventDefault(); analyze(); }});
 $("#pasteBtn").onclick = async () => {
-  // appunti letti da Python: navigator.clipboard farebbe comparire la richiesta di permesso del browser
   const t = await api.paste();
   if(t){ $("#url").value=t.trim(); syncInput(); analyze(); }
 };
@@ -750,7 +1065,7 @@ $("#analyzeBtn").onclick = analyze;
     const raw = (dt.getData("text/uri-list") || dt.getData("text/plain") || "").trim();
     const dropped = raw.split(/\s+/).map(s=>s.trim()).filter(s=>/^https?:\/\//i.test(s));
     if(dropped.length){ $("#url").value = dropped.join("\n"); syncInput(); analyze(); }
-    else if(dt.files && dt.files.length) toast("Per trascrivere un file locale usa «Trascrivi un file…»", "var(--accent)");
+    else if(dt.files && dt.files.length) toast("Per i file locali usa le schede Converti o Trascrivi", "var(--accent)");
   });
 })();
 
@@ -763,7 +1078,7 @@ async function analyze(){
     $("#url").value=""; syncInput(); return;
   }
   const btn=$("#analyzeBtn"); btn.disabled=true; btn.insertAdjacentHTML("afterbegin",'<div class="spin"></div>');
-  $("#preview").classList.remove("show");
+  $("#preview").classList.remove("show"); resetClip();
   try{
     const info = await api.get_info(list[0]);
     if(!info.ok){ toast(info.error, "var(--err)"); return; }
@@ -785,42 +1100,53 @@ async function analyze(){
 }
 $("#dlBtn").onclick = async () => {
   if(!current) return;
-  await api.start_download(current.url, {title:current.title, thumbnail:current.thumbnail, site:siteOf(current.url,current.site).n}, null);
-  $("#preview").classList.remove("show"); $("#url").value=""; syncInput(); current=null;
+  const rs = $("#clipStart").value.trim(), re = $("#clipEnd").value.trim();
+  const useClip = !$("#clipWrap").hidden && !$("#clipBox").hidden && (rs || re);
+  if(useClip && !syncClipDur()){ toast("Controlla l'intervallo di taglio (Da – A)", "var(--warn)"); return; }
+  const ov = useClip ? {clip_start: rs || null, clip_end: re || null, clip_fast: $("#clipFast").checked} : null;
+  await api.start_download(current.url, {title:current.title, thumbnail:current.thumbnail, site:siteOf(current.url,current.site).n}, ov);
+  $("#preview").classList.remove("show"); $("#url").value=""; syncInput(); resetClip(); current=null;
 };
 
-/* ---------- coda ---------- */
-const STATUS = {queued:"In attesa", downloading:"Download", processing:"Elaborazione", transcribing:"Trascrizione", done:"Completato", error:"Errore", cancelled:"Annullato"};
-const busy = j => ["queued","downloading","processing","transcribing"].includes(j.status);
-function renderQueue(){
-  const list = Object.values(jobs).reverse();
-  const active = list.filter(busy).length;
-  $("#activeCount").hidden = !active; $("#activeCount").textContent = active;
-  $("#queueInfo").textContent = list.length ? `${active} in corso · ${list.length} totali` : "";
-  if(!list.length){ $("#queue").innerHTML = `<div class="empty"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 20h14"/></svg>Nessun download in corso</div>`; return; }
-  $("#queue").innerHTML = list.map(j=>{
-    const live = j.status==="downloading" || j.status==="transcribing";
+/* ---------- code condivise (Scarica / Converti / Trascrivi) ---------- */
+const STATUS = {
+  queued:"In attesa", downloading:"Download", processing:"Elaborazione",
+  converting:"Conversione", transcribing:"Trascrizione", diarizing:"Riconoscimento voci",
+  done:"Completato", error:"Errore", cancelled:"Annullato"
+};
+const busy = j => ["queued","downloading","processing","converting","transcribing","diarizing"].includes(j.status);
+
+function jobThumbKind(j){
+  if(j.mode) return j.mode;
+  if(j.quality === "Testo") return "text";
+  if(/^(png|jpg|jpeg|webp|ico|bmp)$/i.test(j.quality || "")) return "image";
+  if(/^(m4a|mp3|wav|flac|ogg|opus)$/i.test(j.quality || "")) return "audio";
+  return "video";
+}
+function renderJobList(container, list, emptySvg, emptyMsg){
+  if(!list.length){ container.innerHTML = `<div class="empty">${emptySvg}${emptyMsg}</div>`; return; }
+  container.innerHTML = list.map(j => {
+    const id = esc(j.id), kind = jobThumbKind(j);
+    const live = ["downloading","converting","transcribing","diarizing"].includes(j.status);
+    const indet = j.status === "converting" && (!j.percent || j.percent <= 0);
     const left = [
-      `<span class="status">${STATUS[j.status]}</span>`,
-      siteHTML(siteOf(j.url, j.site)),
-      `<span class="tag">${esc(j.quality)}</span>`
+      `<span class="status">${STATUS[j.status] || esc(j.status)}</span>`,
+      siteHTML(siteOf(j.url || "", j.site)),
+      `<span class="tag k-${esc(kind)}">${esc(j.quality)}</span>`
     ];
+    if(j.clip) left.push(`<span class="tag k-clip">${esc(j.clip)}</span>`);
     if(j.item) left.push(`<span class="tag">${esc(j.item)}</span>`);
     if(j.current) left.push(`<span class="now" title="${esc(j.current)}">${esc(j.current)}</span>`);
     const right = live ? [
       j.status==="downloading" && j.speed ? `${fmtBytes(j.speed)}/s` : "",
       j.eta!=null ? fmtDur(j.eta) : "",
-      `<b>${(+j.percent||0).toFixed(0)}%</b>`
+      indet ? "In corso…" : `<b>${(+j.percent||0).toFixed(0)}%</b>`
     ].filter(Boolean).join('<span class="sep">·</span>') : "";
-    // i pulsanti portano solo l'id: i dati (percorsi, link) si leggono da "jobs" al clic,
-    // così un titolo o un percorso strano non finisce mai dentro l'HTML come codice
-    const id = esc(j.id);
-    const kind = j.mode || (j.quality==="Testo" ? "text" : /^(m4a|mp3)$/i.test(j.quality||"") ? "audio" : "video");
     const acts = busy(j) ? `<button class="btn sm icon" title="Annulla" data-act="cancel" data-id="${id}">${IC.x}</button>`
-      : j.status==="done" ? `${j.file?`<button class="btn sm icon" title="Apri" data-act="open" data-id="${id}">${IC.open}</button>`:""}<button class="btn sm icon" title="Mostra nella cartella" data-act="folder" data-id="${id}">${IC.folder}</button>`
+      : j.status==="done" ? `${kind==="text"&&j.file?`<button class="btn sm primary" title="Leggi nell'app" data-act="read" data-id="${id}">${IC.read} Leggi</button>`:""}${j.file?`<button class="btn sm icon" title="Apri file" data-act="open" data-id="${id}">${IC.open}</button>`:""}<button class="btn sm icon" title="Mostra nella cartella" data-act="folder" data-id="${id}">${IC.folder}</button>`
       : `<button class="btn sm icon" title="Riprova" data-act="retry" data-id="${id}">${IC.retry}</button>`;
-    return `<div class="job ${esc(j.status)}" data-id="${id}"${j.status==="done"&&j.file?' title="Doppio clic per aprire"':""}>
-      <div class="thumb">${thumbHTML(j.thumbnail, null, kind)}</div>
+    return `<div class="job ${esc(j.status)}${indet?" indet":""}" data-id="${id}"${j.status==="done"&&j.file?(kind==="text"?' title="Doppio clic per leggere"':' title="Doppio clic per aprire"'):""}>
+      <div class="thumb k-${esc(kind)}">${thumbHTML(j.thumbnail, null, kind)}</div>
       <div class="job-main">
         <div class="job-title">${esc(j.title)}</div>
         <div class="job-meta"><div class="job-meta-l">${left.join("")}</div>${right?`<div class="job-meta-r">${right}</div>`:""}</div>
@@ -830,36 +1156,68 @@ function renderQueue(){
       <div class="job-acts">${acts}</div></div>`;
   }).join("");
 }
-$("#queue").addEventListener("click", e => {
-  const b = e.target.closest("button[data-act]"); if(!b) return;
-  const j = jobs[b.dataset.id]; if(!j) return;
-  const act = b.dataset.act;
-  if(act==="cancel") api.cancel(j.id);
-  else if(act==="open") api.open_file(j.file).then(ok=>ok||toast("File non trovato: forse è stato spostato","var(--warn)"));
-  else if(act==="folder") api.open_folder(j.folder, j.file);
-  else if(act==="retry") retry(j.id);
-});
-$("#queue").addEventListener("dblclick", e => {
-  if(e.target.closest("button")) return;
-  const row = e.target.closest(".job[data-id]"); if(!row) return;
-  const j = jobs[row.dataset.id];
-  if(j && j.status==="done" && j.file){
-    api.open_file(j.file).then(ok=>ok||toast("File non trovato: forse è stato spostato","var(--warn)"));
-  }
-});
-async function retry(id){ delete jobs[id]; renderQueue(); await api.retry(id); }
-$("#clearBtn").onclick = async () => { await api.clear_finished();
-  for(const k in jobs) if(!busy(jobs[k])) delete jobs[k]; renderQueue(); };
+function updateQueueHead(list, countEl, infoEl){
+  const active = list.filter(busy).length;
+  countEl.hidden = !active; countEl.textContent = active;
+  infoEl.textContent = list.length ? `${active} in corso · ${list.length} totali` : "";
+}
+function renderQueues(){
+  const all = Object.values(jobs).reverse();
+  const dl = all.filter(j => (j.kind || "download") === "download");
+  const cv = all.filter(j => j.kind === "convert");
+  const tr = all.filter(j => j.kind === "transcribe");
+  updateQueueHead(dl, $("#activeCount"), $("#queueInfo"));
+  updateQueueHead(cv, $("#convertCount"), $("#convertQueueInfo"));
+  updateQueueHead(tr, $("#transcribeCount"), $("#transcribeQueueInfo"));
+  renderJobList($("#queue"), dl, '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 20h14"/></svg>', "Nessun download in corso");
+  renderJobList($("#convertQueue"), cv, '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3l4 4-4 4"/><path d="M3 11V9a2 2 0 0 1 2-2h16"/><path d="M7 21l-4-4 4-4"/><path d="M21 13v2a2 2 0 0 1-2 2H3"/></svg>', "Nessuna conversione in corso");
+  renderJobList($("#transcribeQueue"), tr, '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M8 21h8"/></svg>', "Nessuna trascrizione in corso");
+}
+function wireQueueEvents(container){
+  container.addEventListener("click", e => {
+    const b = e.target.closest("button[data-act]"); if(!b) return;
+    const j = jobs[b.dataset.id]; if(!j) return;
+    const act = b.dataset.act;
+    if(act==="cancel") api.cancel(j.id);
+    else if(act==="read") openReader(j.file, j.title);
+    else if(act==="open") api.open_file(j.file).then(ok=>ok||toast("File non trovato: forse è stato spostato","var(--warn)"));
+    else if(act==="folder") api.open_folder(j.folder, j.file);
+    else if(act==="retry") retry(j.id);
+  });
+  container.addEventListener("dblclick", e => {
+    if(e.target.closest("button")) return;
+    const row = e.target.closest(".job[data-id]"); if(!row) return;
+    const j = jobs[row.dataset.id];
+    if(j && j.status==="done" && j.file){
+      if(jobThumbKind(j)==="text") openReader(j.file, j.title);
+      else api.open_file(j.file).then(ok=>ok||toast("File non trovato: forse è stato spostato","var(--warn)"));
+    }
+  });
+}
+wireQueueEvents($("#queue")); wireQueueEvents($("#convertQueue")); wireQueueEvents($("#transcribeQueue"));
+
+async function retry(id){ delete jobs[id]; renderQueues(); await api.retry(id); }
+async function clearFinishedKind(kind){
+  await api.clear_finished(kind);
+  for(const k in jobs) if(!busy(jobs[k]) && (jobs[k].kind || "download") === kind) delete jobs[k];
+  renderQueues();
+}
+$("#clearBtn").onclick = () => clearFinishedKind("download");
+$("#convClearBtn").onclick = () => clearFinishedKind("convert");
+$("#trClearBtn").onclick = () => clearFinishedKind("transcribe");
 $("#openFolderBtn").onclick = () => api.open_folder(settings.folder, null);
+$("#convOpenFolderBtn").onclick = () => api.open_folder(settings.folder, null);
+$("#trOpenFolderBtn").onclick = () => api.open_folder(settings.folder, null);
 $("#folderLbl").onclick = () => api.open_folder(settings.folder, null);
 $("#pvFolderBtn").onclick = () => $("#chooseFolderBtn").click();
-$("#heroTranscribeBtn").onclick = () => $("#transcribeFileBtn").click();
+$("#heroTranscribeBtn").onclick = () => goView("transcribe");
 
 /* ---------- cronologia ---------- */
 let shownHistory = [];      // le voci mostrate ora: i pulsanti ne portano solo la posizione
 let histFilter = "all", histView = "grid";
 const histKind = h => {
-  if(h.mode === "audio" || /^(m4a|mp3)$/i.test(h.quality || "")) return "audio";
+  if(h.mode === "image" || /^(png|jpg|jpeg|webp|ico|bmp)$/i.test(h.quality || "")) return "image";
+  if(h.mode === "audio" || /^(m4a|mp3|wav|flac|ogg|opus)$/i.test(h.quality || "")) return "audio";
   if(h.mode === "text" || /testo|srt|txt/i.test(h.quality || "")) return "text";
   return "video";
 };
@@ -885,15 +1243,17 @@ function renderHistory(){
   if(!list.length){ $("#hist").innerHTML = `<div class="panel empty" style="grid-column:1/-1">${q || histFilter!=="all"?"Nessun risultato":"Ancora nessun download"}</div>`; return; }
   $("#hist").innerHTML = list.map((h,i)=>{
     const kind = histKind(h);
+    const readBtn = kind==="text" ? `<button class="btn sm primary" data-act="read" data-i="${i}">${IC.read} Leggi</button>` : "";
     const reDlBtn = h.url ? `<button class="btn sm icon" title="Scarica di nuovo" data-act="redl" data-i="${i}">${IC.retry}</button>` : "";
     return `<div class="panel h-item">
-      <div class="thumb">${thumbHTML(h.thumbnail, null, kind)}</div>
+      <div class="thumb k-${esc(kind)}">${thumbHTML(h.thumbnail, null, kind)}</div>
       <div class="h-body">
         <div class="h-info">
           <div class="h-title" title="${esc(h.title)}">${esc(h.title)}</div>
-          <div class="h-meta">${siteHTML(siteOf(h.url,h.site))}<span class="tag">${esc(h.quality)}</span><span title="${esc(h.date)}">${esc(fmtDate(h.date))}</span></div>
+          <div class="h-meta">${siteHTML(siteOf(h.url,h.site))}<span class="tag k-${esc(kind)}">${esc(h.quality)}</span><span title="${esc(h.date)}">${esc(fmtDate(h.date))}</span></div>
         </div>
         <div class="h-acts">
+          ${readBtn}
           <button class="btn sm" data-act="open" data-i="${i}">Apri</button>
           <button class="btn sm icon" title="Mostra nella cartella" data-act="folder" data-i="${i}">${IC.folder}</button>
           ${reDlBtn}
@@ -905,11 +1265,25 @@ $("#hist").addEventListener("click", e => {
   const b = e.target.closest("button[data-act]"); if(!b) return;
   const h = shownHistory[+b.dataset.i]; if(!h) return;
   const act = b.dataset.act;
-  if(act==="open") api.open_file(h.file).then(ok=>ok||toast("File non trovato: forse è stato spostato","var(--warn)"));
+  if(act==="read") openReader(h.file, h.title);
+  else if(act==="open") api.open_file(h.file).then(ok=>ok||toast("File non trovato: forse è stato spostato","var(--warn)"));
   else if(act==="folder") api.open_folder(h.folder, h.file);
   else if(act==="redl") redl(h.url);
 });
-function redl(url){ document.querySelector('.nav[data-view="download"]').click(); $("#url").value=url; syncInput(); analyze(); }
+function redl(url){ goView("download"); $("#url").value=url; syncInput(); analyze(); }
+$("#histSearch").oninput = renderHistory;
+$("#histFilterSeg").onclick = e => {
+  const b = e.target.closest("button[data-f]"); if(!b) return;
+  histFilter = b.dataset.f;
+  $("#histFilterSeg").querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
+  renderHistory();
+};
+$("#histViewSeg").onclick = e => {
+  const b = e.target.closest("button[data-view]"); if(!b) return;
+  histView = b.dataset.view;
+  $("#histViewSeg").querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
+  renderHistory();
+};
 $("#histSearch").oninput = renderHistory;
 $("#histFilterSeg").onclick = e => {
   const b = e.target.closest("button[data-f]"); if(!b) return;
@@ -952,6 +1326,8 @@ function renderSettings(){
   $("#setAudio").value = settings.audio_format; $("#setParallel").value = String(settings.parallel);
   $("#setCookies").value = settings.cookies; $("#setPlaylist").classList.toggle("on", !!settings.playlist);
   $("#setCookieWhen").value = settings.cookie_when || "auto"; $("#setCookieWhen").disabled = settings.cookies === "none";
+  renderConvDest();
+  renderTranscribeTab();
 }
 $("#setCookieWhen").onchange = e => save({cookie_when:e.target.value});
 $("#openLogBtn").onclick = () => api.open_log();
@@ -989,33 +1365,252 @@ $("#unConfirm").onclick = async () => {
   if(!ok){ $("#unConfirm").disabled = false; $("#unConfirm").textContent = "Disinstalla"; $("#uninstall").classList.remove("show"); }
 };
 
-/* ---------- trascrizione (Whisper) ---------- */
-let winfo = null, downloading = null;
+/* ---------- converti ---------- */
+const CONV_OUT = {
+  video: ["mp4","mkv","webm","mov","gif","mp3","m4a","wav"],
+  audio: ["mp3","m4a","wav","flac","ogg","opus"],
+  image: ["png","jpg","webp","ico","bmp"],
+};
+const VIDEO_PRESETS = [["balanced","Bilanciata"],["high","Alta qualità"],["compact10","Compatta < 10 MB"]];
+const AUDIO_KBPS = [["320","320 kbps (Massima)"],["192","192 kbps (Consigliata)"],["128","128 kbps (Leggera)"],["96","96 kbps"]];
+const IMG_QUALS = [["92","Alta (92%)"],["85","Bilanciata (85%)"],["70","Leggera (70%)"]];
+let convFiles = [];
+
+function allowedConvFmts(){
+  if(!convFiles.length) return [];
+  return CONV_OUT[convFiles[0].kind].filter(ext => convFiles.every(f => CONV_OUT[f.kind]?.includes(ext)));
+}
+function renderConvDest(){
+  const toDl = settings.convert_dest === "downloads";
+  $("#convDestChip").innerHTML = `${IC.folder}<span>${toDl ? `Cartella Download (${esc(folderShort(settings.folder) || "Download")})` : "Nella stessa cartella"}</span>`;
+  $("#convDestChip").title = toDl ? `Salva in: ${settings.folder}` : "Salva nella stessa cartella del file originale · clicca per cambiare";
+}
+function syncConvControls(){
+  const fmts = allowedConvFmts();
+  const fmtSel = $("#convFmt"), prev = fmtSel.value;
+  if(!fmts.length){
+    fmtSel.innerHTML = `<option value="">Formati incompatibili</option>`;
+    $("#convPresetWrap").hidden = true; $("#convImgResizeWrap").hidden = true;
+    $("#convStartBtn").disabled = true;
+    return;
+  }
+  $("#convStartBtn").disabled = false;
+  fmtSel.innerHTML = fmts.map(f => `<option value="${f}">${f.toUpperCase()}</option>`).join("");
+  if(fmts.includes(prev)) fmtSel.value = prev;
+  else {
+    const srcExt = (convFiles[0].ext || "").toLowerCase();
+    const diff = fmts.find(f => f !== srcExt);
+    if(diff) fmtSel.value = diff;
+  }
+  const fmt = fmtSel.value;
+  const isImg = CONV_OUT.image.includes(fmt);
+  const preSel = $("#convPreset"), prevPre = preSel.value;
+  $("#convImgResizeWrap").hidden = !isImg || fmt === "ico";
+  if(isImg){
+    const hideQ = fmt === "png" || fmt === "bmp" || fmt === "ico";
+    $("#convPresetWrap").hidden = hideQ;
+    if(!hideQ){
+      preSel.innerHTML = IMG_QUALS.map(([v,l]) => `<option value="${v}">${l}</option>`).join("");
+      preSel.value = IMG_QUALS.some(([v])=>v===prevPre) ? prevPre : "85";
+    }
+  } else if(fmt === "wav" || fmt === "flac" || fmt === "gif"){
+    $("#convPresetWrap").hidden = true;
+  } else if(["mp3","m4a","ogg","opus"].includes(fmt)){
+    $("#convPresetWrap").hidden = false;
+    preSel.innerHTML = AUDIO_KBPS.map(([v,l]) => `<option value="${v}">${l}</option>`).join("");
+    preSel.value = AUDIO_KBPS.some(([v])=>v===prevPre) ? prevPre : "192";
+  } else {
+    $("#convPresetWrap").hidden = false;
+    preSel.innerHTML = VIDEO_PRESETS.map(([v,l]) => `<option value="${v}">${l}</option>`).join("");
+    preSel.value = VIDEO_PRESETS.some(([v])=>v===prevPre) ? prevPre : "balanced";
+  }
+}
+function fileRowHTML(icon, name, meta, idx){
+  return `<div class="file-item">${icon}<div class="f-main"><div class="f-name" title="${esc(name)}">${esc(name)}</div><div class="f-meta">${esc(meta)}</div></div><button class="btn sm icon" data-rm="${idx}" title="Rimuovi">${IC.x}</button></div>`;
+}
+function renderConvFiles(){
+  $("#convFilesWrap").hidden = !convFiles.length;
+  if(!convFiles.length){ $("#convFiles").innerHTML = ""; return; }
+  $("#convFiles").innerHTML = convFiles.map((f, i) => {
+    const icon = f.kind === "image" ? IC.image : IC.file;
+    const info = [
+      (f.ext || "").toUpperCase(),
+      fmtBytes(f.size),
+      f.duration ? fmtDur(f.duration) : "",
+      f.dims || "",
+      f.folder ? `in ${folderShort(f.folder)}` : ""
+    ].filter(Boolean).join(" · ");
+    return fileRowHTML(icon, f.name, info, i);
+  }).join("");
+  renderConvDest();
+  syncConvControls();
+}
+$("#convPickBtn").onclick = async () => {
+  const res = await api.pick_convert_files();
+  if(!res || !res.length) return;
+  const seen = new Set(convFiles.map(x => x.path));
+  for(const f of res) if(!seen.has(f.path)){ seen.add(f.path); convFiles.push(f); }
+  renderConvFiles();
+};
+$("#convFiles").onclick = e => {
+  const b = e.target.closest("button[data-rm]"); if(!b) return;
+  convFiles.splice(+b.dataset.rm, 1); renderConvFiles();
+};
+$("#convFmt").onchange = syncConvControls;
+$("#convDestChip").onclick = () => save({convert_dest: settings.convert_dest === "downloads" ? "same" : "downloads"});
+$("#convStartBtn").onclick = async () => {
+  if(!convFiles.length) return;
+  const fmt = $("#convFmt").value;
+  if(!fmt){ toast("Rimuovi i file di tipo diverso per convertire insieme", "var(--warn)"); return; }
+  const isImg = CONV_OUT.image.includes(fmt), isAud = ["mp3","m4a","ogg","opus"].includes(fmt);
+  const pv = $("#convPreset").value;
+  const opts = {
+    fmt,
+    video_preset: (!isImg && !isAud) ? (pv || "balanced") : "balanced",
+    audio_kbps: isAud ? +(pv || 192) : 192,
+    image_quality: isImg ? +(pv || 85) : 85,
+    image_max_side: isImg && !$("#convImgResizeWrap").hidden ? +($("#convImgResize").value || 0) : 0,
+    dest_mode: settings.convert_dest === "downloads" ? "downloads" : "same",
+  };
+  const ids = await api.start_convert(convFiles, opts);
+  if(ids && ids.length){
+    toast(`${ids.length === 1 ? "Conversione avviata" : ids.length + " conversioni avviate"}`, "var(--ok)");
+    convFiles = []; renderConvFiles();
+  } else toast("Nessun file compatibile con il formato scelto", "var(--warn)");
+};
+
+/* ---------- trascrizione (Whisper + sherpa-onnx) ---------- */
+let winfo = null, downloading = null, trFiles = [];
 const currentModel = () => winfo?.models.find(m => [m.file, m.file_en].includes(winfo.current))
   ? {...winfo.models.find(m => [m.file, m.file_en].includes(winfo.current)), en: winfo.current.includes(".en")} : null;
 const dots = n => `<span class="dots">${[1,2,3,4,5].map(i => `<i class="${i<=n?"on":""}"></i>`).join("")}</span>`;
 const fmtTime = s => s < 60 ? `${Math.max(1, Math.round(s))} s` : `${Math.round(s/60)} min`;
+function renderDlBar(el, dlObj){
+  el.innerHTML = dlObj ? `<div class="bar" style="margin-top:8px"><i style="width:${dlObj.total ? dlObj.done/dlObj.total*100 : 0}%"></i></div>
+    <span>${esc(dlObj.label)} · ${fmtBytes(dlObj.done)}${dlObj.total ? " di " + fmtBytes(dlObj.total) : ""}</span>` : "";
+}
+function renderTranscribeTab(){
+  const m = currentModel();
+  $("#trModelLbl").textContent = m ? `${m.name}${m.en ? " (solo EN)" : ""}${winfo?.gpu_on ? " · NVIDIA" : ""}` : "Nessun modello installato";
+  $("#trModelGo").textContent = m ? "cambia" : "scegli";
+  const ts = !!settings.whisper_timestamps;
+  const diar = !!(winfo ? winfo.diar_on : settings.whisper_diarize);
+  $("#setTrTimestamps").classList.toggle("on", ts);
+  $("#setTrDiarize").classList.toggle("on", diar);
+  $("#trSpeakersRow").hidden = !diar;
+  $("#setTrSpeakers").value = String(settings.whisper_speakers || 0);
+  const lang = settings.whisper_lang || winfo?.lang || "auto";
+  $("#setTrLang").value = lang;
+  const d = downloading && downloading.id === "diar" ? downloading : null;
+  if(d) $("#trDiarizeHint").textContent = `Scarico componenti offline: ${fmtBytes(d.done)}${d.total ? " di " + fmtBytes(d.total) : ""}…`;
+  else if(winfo?.diar_on) $("#trDiarizeHint").textContent = "Attiva: assegna chi parla ad ogni frase (puoi rinominare gli interlocutori nel lettore).";
+  else if(winfo?.diar_installed) $("#trDiarizeHint").textContent = "Motore già scaricato offline: attiva per separare le voci in qualsiasi lingua.";
+  else $("#trDiarizeHint").innerHTML = 'Riconosce automaticamente chi parla (<code style="font-family:var(--mono)">Interlocutore 1</code>, <code style="font-family:var(--mono)">2</code>…). Richiede 61 MB una tantum all\'attivazione.';
+}
+function renderTrFiles(){
+  $("#trFilesWrap").hidden = !trFiles.length;
+  if(!trFiles.length){ $("#trFiles").innerHTML = ""; return; }
+  $("#trFilesCount").textContent = `${trFiles.length} file pront${trFiles.length===1?"o":"i"}`;
+  $("#trFiles").innerHTML = trFiles.map((f, i) => fileRowHTML(IC.file, f.name, `${fmtBytes(f.size)}${f.folder ? " · in " + folderShort(f.folder) : ""}`, i)).join("");
+}
+$("#trModelGo").onclick = e => { e.preventDefault(); goModels(); };
+$("#trPickBtn").onclick = async () => {
+  const res = await api.pick_transcribe_files();
+  if(!res || !res.length) return;
+  const seen = new Set(trFiles.map(x => x.path));
+  for(const f of res) if(!seen.has(f.path)){ seen.add(f.path); trFiles.push(f); }
+  renderTrFiles();
+};
+$("#trFiles").onclick = e => {
+  const b = e.target.closest("button[data-rm]"); if(!b) return;
+  trFiles.splice(+b.dataset.rm, 1); renderTrFiles();
+};
+$("#trStartFilesBtn").onclick = async () => {
+  if(!trFiles.length) return;
+  if(!currentModel()){ if(await ask("Serve un modello", "Per trascrivere scegli prima un modello di Whisper.", "Scegli il modello", false)) goModels(); return; }
+  const r = await api.transcribe_files(trFiles.map(f => f.path), {
+    timestamps: !!settings.whisper_timestamps,
+    diarize: !!(winfo ? winfo.diar_on : settings.whisper_diarize),
+    speakers: +(settings.whisper_speakers || 0),
+  });
+  if(r && r.ok){
+    toast(`${r.ids.length === 1 ? "Trascrizione avviata" : r.ids.length + " trascrizioni avviate"}`, "var(--ok)");
+    trFiles = []; renderTrFiles();
+  } else toast(r?.error || "Errore durante l'avvio", "var(--err)");
+};
+async function startTranscribeUrl(){
+  const u = $("#trUrl").value.trim();
+  if(!/^https?:\/\//i.test(u)){ toast("Incolla un link valido", "var(--warn)"); return; }
+  if(!currentModel()){ if(await ask("Serve un modello", "Per trascrivere scegli prima un modello di Whisper.", "Scegli il modello", false)) goModels(); return; }
+  const id = await api.start_download(u, {title:u, site:siteOf(u).n}, {
+    mode:"text", from_transcribe:true,
+    timestamps: !!settings.whisper_timestamps,
+    diarize: !!(winfo ? winfo.diar_on : settings.whisper_diarize),
+    speakers: +(settings.whisper_speakers || 0),
+  });
+  if(id){ $("#trUrl").value = ""; toast("Trascrizione dal link avviata", "var(--ok)"); }
+  else toast("Link non valido", "var(--warn)");
+}
+$("#trUrlBtn").onclick = startTranscribeUrl;
+$("#trUrl").addEventListener("keydown", e => { if(e.key === "Enter"){ e.preventDefault(); startTranscribeUrl(); }});
+$("#setTrTimestamps").onclick = () => save({whisper_timestamps: !settings.whisper_timestamps});
+$("#setTrSpeakers").onchange = e => save({whisper_speakers: +e.target.value});
+$("#setTrLang").onchange = e => { save({whisper_lang: e.target.value}); if(winfo) winfo.lang = e.target.value; renderWhisper(); };
+
+async function toggleDiarize(){
+  if(downloading) return;
+  const enable = !(winfo ? winfo.diar_on : settings.whisper_diarize);
+  if(enable && !winfo?.diar_installed){
+    if(!await ask("Attivare la separazione interlocutori?",
+      "Per riconoscere automaticamente chi parla in qualsiasi lingua (anche italiano) AxTools scarica una volta sola un motore vocale offline (61 MB). "
+      + "Puoi eliminarlo quando vuoi dalle Impostazioni.", "Scarica e attiva", false)) return;
+    downloading = {id: "diar", done: 0, total: winfo?.diar_size || 60839352, label: "Motore interlocutori"};
+    renderWhisper();
+  }
+  const r = await api.whisper_diarize(enable);
+  downloading = null;
+  if(r.ok){
+    winfo = r; settings.whisper_diarize = !!r.diar_on;
+    renderWhisper();
+    if(enable) toast("Separazione interlocutori attiva", "var(--ok)");
+  } else { renderWhisper(); toast(r.error || "Installazione non riuscita", "var(--err)"); }
+}
+$("#setTrDiarize").onclick = toggleDiarize;
+$("#setDiar").onclick = toggleDiarize;
+$("#diarDeleteBtn").onclick = async () => {
+  if(!await ask("Togliere il motore interlocutori?", `Libera ${fmtBytes(winfo.diar_disk)} su disco; la trascrizione continuerà senza dividere le voci. Potrai riscaricarlo quando vuoi.`, "Elimina")) return;
+  winfo = await api.whisper_diarize_delete();
+  settings.whisper_diarize = false;
+  renderWhisper();
+};
+
 async function loadWhisper(){ winfo = await api.whisper_info(); renderWhisper(); renderOpts(); }
 function renderWhisper(){
   if(!winfo) return;
   const sys = winfo.system, cur = winfo.current;
   $("#setWhisperLang").value = winfo.lang || "auto";
-  // scheda NVIDIA: solo se c'è; il motore CUDA si scarica solo attivando l'interruttore
   $("#gpuRow").hidden = !sys.nvidia;
   $("#setGpu").classList.toggle("on", !!winfo.gpu_on);
   $("#gpuDeleteBtn").hidden = !winfo.gpu_installed || (downloading && downloading.id === "gpu");
   $("#gpuText").textContent = winfo.gpu_installed
     ? `Trascrive con la ${sys.gpu_name || "scheda NVIDIA"}: circa 7 volte più veloce del processore. Occupa ${fmtBytes(winfo.gpu_disk)}: "Elimina" lo toglie e si torna al processore.`
     : `Trascrive con la ${sys.gpu_name || "scheda NVIDIA"}: circa 7 volte più veloce del processore. Attivandola si scarica una volta sola il motore NVIDIA (653 MB, 1,1 GB su disco). La prima trascrizione richiede circa mezzo minuto in più: la scheda si prepara una volta sola.`;
-  const g = downloading && downloading.id === "gpu" ? downloading : null;
-  $("#gpuProgress").innerHTML = g ? `<div class="bar" style="margin-top:8px"><i style="width:${g.total ? g.done/g.total*100 : 0}%"></i></div>
-    <span>${esc(g.label)} · ${fmtBytes(g.done)}${g.total ? " di " + fmtBytes(g.total) : ""}</span>` : "";
+  renderDlBar($("#gpuProgress"), downloading && downloading.id === "gpu" ? downloading : null);
+
+  $("#setDiar").classList.toggle("on", !!winfo.diar_on);
+  $("#diarDeleteBtn").hidden = !winfo.diar_installed || (downloading && downloading.id === "diar");
+  $("#diarText").textContent = winfo.diar_installed
+    ? `Riconosce automaticamente chi sta parlando (Pyannote + WeSpeaker, funziona in italiano e offline). Occupa ${fmtBytes(winfo.diar_disk)}: "Elimina" lo rimuove.`
+    : `Riconosce automaticamente chi sta parlando in qualsiasi lingua usando Pyannote 3.0 + WeSpeaker (offline, 61 MB una tantum).`;
+  renderDlBar($("#diarProgress"), downloading && downloading.id === "diar" ? downloading : null);
+  renderTranscribeTab();
+
   $("#whisperStatus").textContent = (winfo.engine ? "Motore installato" : "Motore non ancora installato (9 MB, si scarica con il primo modello)")
     + ` · modelli scaricati: ${winfo.disk ? fmtBytes(winfo.disk) : "nessuno"} · questo PC: ${sys.cores} core, ${sys.ram} GB di RAM${sys.nvidia ? ", scheda NVIDIA" : ""}`;
   $("#models").innerHTML = winfo.models.map(m => {
     const isCur = cur === m.file || cur === m.file_en, rec = m.id === winfo.recommended;
-    const busy = downloading && downloading.id === m.id;
-    const pct = busy && downloading.total ? downloading.done / downloading.total * 100 : 0;
+    const isBusy = downloading && downloading.id === m.id;
+    const pct = isBusy && downloading.total ? downloading.done / downloading.total * 100 : 0;
     const btn = (file, en, have, label) => have
       ? (cur === file ? `<button class="btn sm" disabled>In uso</button>` : `<button class="btn sm" data-use="${file}">Usa${label}</button>`)
         + `<button class="btn sm danger" data-del="${file}" title="Elimina il file del modello">Elimina${label}</button>`
@@ -1026,7 +1621,7 @@ function renderWhisper(){
       <div class="meters"><span>Italiano</span>${dots(m.it)}<span>Inglese</span>${dots(m.en)}<span>Velocità</span>${dots(m.speed)}</div>
       <div class="note">${esc(m.note)}</div>
       <div class="eta">10 minuti di audio ≈ ${fmtTime(m.ten_min)} su questo PC${winfo.gpu_on ? " con la GPU" : ""} · RAM consigliata ${m.ram} GB</div>
-      ${busy ? `<div class="bar"><i style="width:${pct}%"></i></div><div class="eta">${esc(downloading.label)} · ${fmtBytes(downloading.done)}${downloading.total?" di "+fmtBytes(downloading.total):""}</div>` : ""}
+      ${isBusy ? `<div class="bar"><i style="width:${pct}%"></i></div><div class="eta">${esc(downloading.label)} · ${fmtBytes(downloading.done)}${downloading.total?" di "+fmtBytes(downloading.total):""}</div>` : ""}
       <div class="acts">${btn(m.file, false, m.have, "")}${m.file_en ? btn(m.file_en, true, m.have_en, " solo inglese") : ""}</div>
     </div>`;
   }).join("");
@@ -1084,13 +1679,122 @@ $("#transcribeFileBtn").onclick = async () => {
   if(!currentModel()){ if(await ask("Serve un modello", "Per trascrivere un file scegli prima un modello di Whisper.", "Scegli il modello", false)) goModels(); return; }
   const r = await api.transcribe_file();
   if(r && r.error) toast(r.error, "var(--err)");
+  else if(r && r.ok) goView("transcribe");
+};
+
+/* ---------- lettore trascrizioni ---------- */
+let readerState = null;
+function highlightEsc(text, query){
+  const s = String(text ?? "");
+  if(!query) return esc(s);
+  const low = s.toLowerCase(), q = query.toLowerCase();
+  let out = "", pos = 0, idx;
+  while((idx = low.indexOf(q, pos)) !== -1){
+    out += esc(s.slice(pos, idx)) + `<mark>${esc(s.slice(idx, idx + q.length))}</mark>`;
+    pos = idx + q.length;
+  }
+  return out + esc(s.slice(pos));
+}
+function uniqueSpeakers(segs){
+  const seen = [], set = new Set();
+  for(const s of segs){ const sp = (s.speaker || "").trim(); if(sp && !set.has(sp)){ set.add(sp); seen.push(sp); } }
+  return seen;
+}
+function renderReaderBody(){
+  if(!readerState) return;
+  const q = readerState.query.trim().toLowerCase();
+  const list = readerState.segments.filter(s => !q || String(s.text||"").toLowerCase().includes(q)
+    || String(readerState.speakerMap[s.speaker] || s.speaker || "").toLowerCase().includes(q));
+  if(!list.length){
+    $("#readerBody").innerHTML = `<div class="empty">${q ? "Nessuna frase trovata" : "Trascrizione vuota"}</div>`;
+  } else {
+    $("#readerBody").innerHTML = list.map(s => {
+      const ts = readerState.showTs && s.start != null ? `[${fmtDur(s.start)}]` : "";
+      const spk = s.speaker ? (readerState.speakerMap[s.speaker] || s.speaker) : "";
+      const si = s.speaker ? (readerState.speakerIdx[s.speaker] ?? 0) : 0;
+      return `<div class="seg-line"><span class="seg-ts">${esc(ts)}</span><div class="seg-txt">${spk ? `<span class="seg-spk" data-si="${si}">${esc(spk)}</span>` : ""}${highlightEsc(s.text, q)}</div></div>`;
+    }).join("");
+  }
+  const spkCount = readerState.speakers.length;
+  $("#readerMeta").textContent = `${list.length}${list.length !== readerState.segments.length ? " di " + readerState.segments.length : ""} frasi`
+    + (spkCount ? ` · ${spkCount} interlocutor${spkCount===1?"e":"i"}` : "")
+    + (readerState.has_srt ? " · salva .txt e .srt" : " · salva .txt");
+}
+function renderReader(){
+  if(!readerState) return;
+  $("#readerSpeakers").innerHTML = readerState.speakers.map(sp =>
+    `<label class="spk-chip" data-si="${readerState.speakerIdx[sp] ?? 0}"><span>${esc(sp)} →</span><input data-spk="${esc(sp)}" value="${esc(readerState.speakerMap[sp] || sp)}" maxlength="40"></label>`
+  ).join("");
+  $("#readerSpeakers").hidden = !readerState.speakers.length;
+  renderReaderBody();
+}
+async function openReader(path, titleHint=""){
+  const r = await api.read_transcript(path);
+  if(!r || !r.ok){ toast(r?.error || "Impossibile aprire la trascrizione", "var(--err)"); return; }
+  const spks = uniqueSpeakers(r.segments || []);
+  const hasTsInRaw = /\[\d{1,2}:\d{2}(?::\d{2})?\]/.test(r.raw || "");
+  readerState = {
+    path: r.path, has_srt: !!r.has_srt, title: titleHint || r.title || "Trascrizione",
+    segments: r.segments || [], speakers: spks,
+    speakerIdx: Object.fromEntries(spks.map((s, i) => [s, i % 6])),
+    speakerMap: Object.fromEntries(spks.map(s => [s, s])),
+    showTs: !!(hasTsInRaw || (r.segments?.some(s => s.start != null) && settings.whisper_timestamps)),
+    query: "",
+  };
+  $("#readerTitle").textContent = readerState.title;
+  $("#readerSearch").value = "";
+  $("#readerTsToggle").checked = readerState.showTs;
+  renderReader();
+  $("#readerOverlay").classList.add("show");
+}
+function closeReader(){ $("#readerOverlay").classList.remove("show"); readerState = null; }
+$("#readerClose").onclick = closeReader;
+$("#readerOverlay").onclick = e => { if(e.target === $("#readerOverlay")) closeReader(); };
+document.addEventListener("keydown", e => {
+  if(e.key === "Escape" && $("#readerOverlay").classList.contains("show") && !$("#askBox").classList.contains("show")) closeReader();
+});
+$("#readerSearch").oninput = e => { if(readerState){ readerState.query = e.target.value; renderReaderBody(); } };
+$("#readerTsToggle").onchange = e => { if(readerState){ readerState.showTs = e.target.checked; renderReaderBody(); } };
+$("#readerSpeakers").oninput = e => {
+  const inp = e.target.closest("input[data-spk]"); if(!inp || !readerState) return;
+  readerState.speakerMap[inp.dataset.spk] = inp.value.trim() || inp.dataset.spk;
+  renderReaderBody();
+};
+$("#readerFolderBtn").onclick = () => { if(readerState) api.open_folder(null, readerState.path); };
+$("#readerCopyBtn").onclick = async () => {
+  if(!readerState) return;
+  const txt = readerState.segments.map(s => {
+    const p = [];
+    if(readerState.showTs && s.start != null) p.push(`[${fmtDur(s.start)}]`);
+    const sp = s.speaker ? (readerState.speakerMap[s.speaker] || s.speaker) : "";
+    if(sp) p.push(`${sp}:`);
+    p.push(s.text);
+    return p.join(" ");
+  }).join("\n");
+  await api.copy_text(txt);
+  toast("Trascrizione copiata negli appunti", "var(--ok)");
+};
+$("#readerSaveBtn").onclick = async () => {
+  if(!readerState) return;
+  const b = $("#readerSaveBtn"); b.disabled = true; b.textContent = "Salvo…";
+  try{
+    const res = await api.save_transcript(readerState.path, readerState.segments, readerState.showTs, readerState.speakerMap);
+    if(res && res.ok){
+      readerState.segments = res.segments;
+      readerState.speakers = uniqueSpeakers(res.segments);
+      readerState.speakerIdx = Object.fromEntries(readerState.speakers.map((s, i) => [s, i % 6]));
+      readerState.speakerMap = Object.fromEntries(readerState.speakers.map(s => [s, s]));
+      renderReader();
+      toast(readerState.has_srt ? "Salvato in .txt e .srt" : "File .txt salvato", "var(--ok)");
+    } else toast(res?.error || "Salvataggio non riuscito", "var(--err)");
+  } finally { b.disabled = false; b.textContent = "Salva su file"; }
 };
 
 /* ---------- eventi dal backend ---------- */
 window.onBackend = (ev, data) => {
   if(ev==="model"){ if(downloading){ Object.assign(downloading, data); renderWhisper(); } return; }
   if(ev==="job"){
-    const prevJob = jobs[data.id], prev = prevJob?.status; jobs[data.id] = data; renderQueue();
+    const prevJob = jobs[data.id], prev = prevJob?.status; jobs[data.id] = data; renderQueues();
     if(data.warning && !prevJob?.warning) toast(data.warning, "var(--warn)");
     if(prev!==data.status && data.status==="done") toast("Completato: "+data.title, "var(--ok)");
     if(prev!==data.status && data.status==="error") toast("Errore: "+data.title, "var(--err)");
@@ -1114,10 +1818,8 @@ async function ensureDeps(){
 }
 $("#setupRetry").onclick = ensureDeps;
 
-/* ---------- versione di AxGrab e aggiornamenti ---------- */
+/* ---------- versione di AxTools e aggiornamenti ---------- */
 let appInfo = {}, pendingUpdate = null;
-// la versione rimandata con "Più tardi" sta nelle impostazioni: il localStorage della finestra
-// non sopravvive alla chiusura dell'app
 const skipped = () => settings.skip_version || "";
 async function checkAppUpdate(manual){
   const r = await api.check_update();
@@ -1125,11 +1827,11 @@ async function checkAppUpdate(manual){
   if(!r.update){ $("#updateBanner").hidden = true; if(manual) toast(`Hai già l'ultima versione (${r.current})`, "var(--ok)"); return; }
   pendingUpdate = r;
   $("#appVer").textContent = `Versione ${r.current} · disponibile la ${r.latest}`;
-  if(!manual && skipped() === r.latest) return;      // l'utente ha scelto "più tardi" per questa versione
-  $("#ubTitle").textContent = `È disponibile AxGrab ${r.latest}`;
+  if(!manual && skipped() === r.latest) return;
+  $("#ubTitle").textContent = `È disponibile AxTools ${r.latest}`;
   $("#ubSub").textContent = r.auto
-    ? `Tu hai la ${r.current}. Con "Aggiorna ora" AxGrab si aggiorna e si riavvia da solo.`
-    : `Tu hai la ${r.current}. Scarica il nuovo AxGrab.exe e sostituisci quello vecchio.`;
+    ? `Tu hai la ${r.current}. Con "Aggiorna ora" AxTools si aggiorna e si riavvia da solo.`
+    : `Tu hai la ${r.current}. Scarica il nuovo AxTools.exe e sostituisci quello vecchio.`;
   $("#ubGet").textContent = r.auto ? "Aggiorna ora" : "Scarica";
   $("#updateBanner").hidden = false;
 }
@@ -1137,7 +1839,7 @@ $("#ubGet").onclick = async () => {
   if(!pendingUpdate?.auto){ api.open_url(pendingUpdate?.page || appInfo.repo + "/releases/latest"); return; }
   const b=$("#ubGet"); b.disabled=true; $("#ubLater").disabled=true; b.innerHTML='<div class="spin"></div>Aggiorno';
   const r = await api.apply_update();
-  if(r.restarting){ $("#ubTitle").textContent = `Riavvio con AxGrab ${r.version}…`; $("#ubSub").textContent = "Un attimo: la finestra si chiude e si riapre aggiornata."; return; }
+  if(r.restarting){ $("#ubTitle").textContent = `Riavvio con AxTools ${r.version}…`; $("#ubSub").textContent = "Un attimo: la finestra si chiude e si riapre aggiornata."; return; }
   b.disabled=false; $("#ubLater").disabled=false; b.textContent="Aggiorna ora";
   if(!r.ok) toast("Aggiornamento non riuscito: " + r.error, "var(--err)");
 };
@@ -1152,31 +1854,65 @@ async function init(){
   settings = await api.get_settings(); history = await api.get_history();
   appInfo = await api.app_info();
   $("#appVer").textContent = `Versione ${appInfo.version}`; $("#aboutVer").textContent = appInfo.version;
-  syncInput(); renderSettings(); renderOpts(); renderQueue();
+  syncInput(); renderSettings(); renderOpts(); renderQueues();
   await ensureDeps(); loadVersion(); loadWhisper();
   setTimeout(() => checkAppUpdate(false), 2500);
 }
 
 /* ---------- avvio: pywebview oppure demo nel browser ---------- */
 window.addEventListener("pywebviewready", () => { api = window.pywebview.api; init(); });
-setTimeout(() => { if(!api && !window.pywebview){ api = makeDemoApi(); init(); } }, 700);
+setTimeout(() => { if(!api && !window.pywebview){ api = makeDemoApi(); init(); } }, 250);
 
 function makeDemoApi(){
-  const st = {folder:"C:\\Users\\Tu\\Downloads", mode:"video", quality:"1080", audio_format:"m4a", cookies:"none", playlist:false, parallel:2};
-  const th = "data:image/svg+xml," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 90"><rect width="160" height="90" fill="#26262c"/><path d="M0 70 L40 45 L70 62 L110 30 L160 58 V90 H0Z" fill="#33333a"/><circle cx="122" cy="22" r="8" fill="#3d3d45"/></svg>');
-  const hist = [{title:"Intervista podcast episodio 14.mp3", url:"", thumbnail:null, site:"File", mode:"text", quality:"Testo", date:"2026-11-20 13:45"},
-                {title:"Tramonto in time-lapse sulle Dolomiti", url:"https://youtube.com/watch?v=a", thumbnail:th, site:"Youtube", mode:"video", quality:"1080p", date:"2026-11-11 21:04"},
-                {title:"Ricetta pasta al limone in 60 secondi", url:"https://tiktok.com/@x/video/1", thumbnail:th, site:"TikTok", mode:"audio", quality:"M4A", date:"2026-11-10 18:22"}];
+  const st = {folder:"C:\\Users\\Andrea\\Downloads", mode:"video", quality:"1080", audio_format:"m4a", cookies:"none", playlist:false, parallel:2,
+    whisper_model:"ggml-turbo.bin", whisper_lang:"it", whisper_timestamps:true, whisper_diarize:true, whisper_speakers:0, convert_dest:"same"};
+  const th = "data:image/svg+xml," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 90"><rect width="160" height="90" fill="#26262c"/><path d="M0 70 L40 45 L70 62 L110 30 L160 58 V90 H0Z" fill="#33333a"/><circle cx="122" cy="22" r="8" fill="#7457f0"/></svg>');
+  const demoTranscripts = {
+    "demo-podcast.txt": {
+      title: "Intervista podcast episodio 14", has_srt: true,
+      segments: [
+        {start:2, end:8, speaker:"Interlocutore 1", text:"Benvenuti a questa nuova puntata! Oggi parliamo di editing rapido e flussi offline."},
+        {start:9, end:16, speaker:"Interlocutore 2", text:"Ciao a tutti! Sì, soprattutto di come organizzare clip e trascrizioni senza dipendere dal cloud."},
+        {start:17, end:25, speaker:"Interlocutore 1", text:"Esatto: poter tagliare subito un intervallo Da e A fa risparmiare un sacco di spazio."},
+        {start:26, end:34, speaker:"Interlocutore 2", text:"E separare automaticamente chi parla rende gli appunti subito leggibili anche per riunioni lunghe."},
+        {start:35, end:42, speaker:"Interlocutore 1", text:"Puoi perfino rinominare Interlocutore 1 qui sopra e salvare insieme sia il .txt che i sottotitoli .srt."},
+      ]
+    }
+  };
+  let hist = [
+    {title:"Intervista podcast episodio 14.mp3", url:"", thumbnail:null, site:"File", mode:"text", quality:"Testo", file:"demo-podcast.txt", folder:"C:\\Users\\Andrea\\Music", date:"2026-11-23 14:20"},
+    {title:"Copertina_vlog.webp", url:"", thumbnail:th, site:"File", mode:"image", quality:"WEBP", file:"C:\\Users\\Andrea\\Pictures\\Copertina_vlog.webp", folder:"C:\\Users\\Andrea\\Pictures", date:"2026-11-23 13:55"},
+    {title:"Tramonto in time-lapse sulle Dolomiti", url:"https://youtube.com/watch?v=a", thumbnail:th, site:"Youtube", mode:"video", quality:"1080p", file:"C:\\Users\\Andrea\\Downloads\\Dolomiti.mp4", folder:"C:\\Users\\Andrea\\Downloads", date:"2026-11-22 21:04"},
+    {title:"Ricetta pasta al limone in 60 secondi", url:"https://tiktok.com/@x/video/1", thumbnail:th, site:"TikTok", mode:"audio", quality:"M4A", file:"C:\\Users\\Andrea\\Downloads\\Ricetta.m4a", folder:"C:\\Users\\Andrea\\Downloads", date:"2026-11-20 18:22"},
+  ];
   setTimeout(()=>{
-    const mk=(id,t,s,st,p,q,u,extra={})=>window.onBackend("job",{id,title:t,site:s,status:st,percent:p,quality:q,url:u,thumbnail:th,speed:12.4e6,eta:37,folder:"",...extra});
+    const mk=(id,t,s,status,p,q,u,extra={})=>window.onBackend("job",{id,kind:"download",title:t,site:s,status,percent:p,quality:q,url:u,thumbnail:th,speed:12.4e6,eta:37,folder:st.folder||"",...extra});
     mk("d","Video privato","Facebook","error",30,"720p","https://facebook.com/z",{error:"This video is only available for registered users. Use --cookies-from-browser"});
-    mk("c","Mix lo-fi per studiare","Youtube","done",100,"M4A","https://youtube.com/y",{file:"x"});
-    mk("b","Reel: tour dello studio","Instagram","processing",100,"1080p","https://instagram.com/reel/x");
+    mk("c","Mix lo-fi per studiare (0:30–2:00)","Youtube","done",100,"1080p","https://youtube.com/y",{clip:"0:30–2:00",file:"x"});
     mk("a","Lezione completa di fotografia notturna","Youtube","downloading",64,"2160p","https://youtube.com/x");
-  }, 300);
-  let maxed=false;
-  const W = (id,name,size,it,en,speed,ram,note,ten,en_size) => ({id,name,file:`ggml-${id}.bin`,size,file_en:en_size?`ggml-${id}.en.bin`:null,size_en:en_size,it,en,speed,ram,note,have:false,have_en:false,ten_min:ten});
-  const demoW = {engine:false, current:"", lang:"auto", disk:0, recommended:"turbo", gpu_installed:false, gpu_on:false, gpu_disk:0,
+    window.onBackend("job",{id:"cv1",kind:"convert",title:"clip_discord.mov",site:"File",mode:"video",status:"converting",percent:68,eta:9,quality:"MP4",folder:"C:\\Users\\Andrea\\Videos"});
+    window.onBackend("job",{id:"tr1",kind:"transcribe",title:"Intervista podcast episodio 14.mp3",site:"File",mode:"text",status:"done",percent:100,quality:"Testo",file:"demo-podcast.txt",folder:"C:\\Users\\Andrea\\Music"});
+  }, 180);
+
+  let maxed=false, nextId=1, convBatch=0;
+  const CONV_MOCKS = [
+    [
+      {path:"C:\\Users\\Andrea\\Videos\\clip_vacanza.mov", name:"clip_vacanza.mov", folder:"C:\\Users\\Andrea\\Videos", kind:"video", ext:"mov", size:48500000, duration:42, dims:"1920x1080"},
+      {path:"C:\\Users\\Andrea\\Videos\\gameplay_boss.mkv", name:"gameplay_boss.mkv", folder:"C:\\Users\\Andrea\\Videos", kind:"video", ext:"mkv", size:96200000, duration:78, dims:"2560x1440"},
+    ],
+    [
+      {path:"C:\\Users\\Andrea\\Pictures\\copertina_raw.png", name:"copertina_raw.png", folder:"C:\\Users\\Andrea\\Pictures", kind:"image", ext:"png", size:6420000, duration:null, dims:"3840x2160"},
+      {path:"C:\\Users\\Andrea\\Pictures\\avatar_studio.png", name:"avatar_studio.png", folder:"C:\\Users\\Andrea\\Pictures", kind:"image", ext:"png", size:1850000, duration:null, dims:"1024x1024"},
+    ],
+    [
+      {path:"C:\\Users\\Andrea\\Music\\registrazione_live.wav", name:"registrazione_live.wav", folder:"C:\\Users\\Andrea\\Music", kind:"audio", ext:"wav", size:84100000, duration:485, dims:""},
+    ],
+  ];
+  const W = (id,name,size,it,en,speed,ram,note,ten,en_size) => ({id,name,file:`ggml-${id}.bin`,size,file_en:en_size?`ggml-${id}.en.bin`:null,size_en:en_size,it,en,speed,ram,note,have:id==="turbo",have_en:false,ten_min:ten});
+  const demoW = {engine:true, current:"ggml-turbo.bin", lang:"it", disk:574041195, recommended:"turbo",
+    gpu_installed:false, gpu_on:false, gpu_disk:0,
+    diar_installed:true, diar_on:true, diar_disk:60839352, diar_size:60839352,
+    timestamps:true, speakers:0,
     system:{ram:31.4,cores:16,nvidia:true,gpu_name:"NVIDIA GeForce RTX 5080"}, models:[
     W("tiny","Tiny",32152673,1,2,5,1,"Solo per provare o per PC molto vecchi: in italiano sbaglia spesso.",17,32166155),
     W("base","Base",59707625,2,3,5,1,"Appunti veloci con audio pulito, una sola persona che parla.",30,59721011),
@@ -1184,25 +1920,126 @@ function makeDemoApi(){
     W("medium","Medium",539212467,4,5,2,4,"Preciso ma lento: a parità di peso, Large-v3 Turbo è meglio e più veloce.",210,539225533),
     W("turbo","Large-v3 Turbo",574041195,5,5,3,4,"Il miglior rapporto tra qualità, velocità e peso. Ottimo in italiano.",138,null),
     W("large","Large-v3",1081140203,5,5,1,6,"La massima precisione, a costo di tempi lunghi senza scheda video.",360,null)]};
+
+  function runDemoJob(j, steps, onDone){
+    let i = 0;
+    const tick = () => {
+      if(i >= steps.length){
+        Object.assign(j, {status:"done", percent:100, speed:null, eta:null});
+        if(onDone) onDone();
+        window.onBackend("job", {...j});
+        window.onBackend("history", hist);
+        return;
+      }
+      Object.assign(j, steps[i++]);
+      window.onBackend("job", {...j});
+      setTimeout(tick, 380);
+    };
+    window.onBackend("job", {...j});
+    setTimeout(tick, 240);
+  }
+
   return {
-    get_settings: async()=>st, save_settings: async p=>Object.assign(st,p), get_history: async()=>hist,
+    get_settings: async()=>({...st}),
+    save_settings: async p=>{ Object.assign(st,p); demoW.lang=st.whisper_lang||"auto"; return {...st}; },
+    get_history: async()=>hist,
     check_deps: async()=>({ytdlp:true, ffmpeg:true, deno:true}), version: async()=>"2026.10.26",
-    get_info: async u=>{ await new Promise(r=>setTimeout(r,600)); return {ok:true,title:"Come costruire una piccola casa nel bosco, dall'inizio alla fine",uploader:"Canale Demo",duration:1337,thumbnail:th,site:"Youtube",playlist:false,count:1,heights:[2160,1440,1080,720,480]}; },
-    start_download: async()=>"x", cancel: async()=>1, retry: async()=>1, clear_finished: async()=>1, clear_history: async()=>1,
+    get_info: async u=>{ await new Promise(r=>setTimeout(r,350)); return {ok:true,title:"Come costruire una piccola casa nel bosco, dall'inizio alla fine",uploader:"Canale Demo",duration:1337,thumbnail:th,site:siteOf(u).n||"YouTube",playlist:false,count:1,heights:[2160,1440,1080,720,480]}; },
+    start_download: async(u, info={}, ov={})=>{
+      const id = "d" + nextId++;
+      const mode = ov?.mode || st.mode, kind = ov?.from_transcribe ? "transcribe" : "download";
+      const clipLbl = (ov?.clip_start || ov?.clip_end) ? `${ov.clip_start||"0:00"}–${ov.clip_end||"fine"}` : "";
+      const j = {id, kind, mode, url:u, title:info.title||u, site:info.site||siteOf(u).n, status:"queued", percent:0,
+        quality: mode==="text" ? "Testo" : mode==="thumb" ? "JPG" : mode==="audio" ? st.audio_format.toUpperCase() : (st.quality==="best"?"Max":st.quality+"p"),
+        clip:clipLbl, thumbnail:info.thumbnail||th, folder:st.folder, file: mode==="text" ? "demo-podcast.txt" : "demo.mp4"};
+      const steps = mode==="text"
+        ? [{status:"downloading",percent:35,speed:9.1e6,eta:4},{status:"transcribing",percent:45,eta:5},{status:"diarizing",percent:75,eta:2}]
+        : [{status:"downloading",percent:35,speed:14.2e6,eta:5},{status:"downloading",percent:82,speed:15.1e6,eta:1},{status:"processing",percent:95}];
+      runDemoJob(j, steps, () => {
+        hist.unshift({title:j.title, url:u, thumbnail:j.thumbnail, site:j.site, mode, quality:j.quality, file:j.file, folder:st.folder, date:"2026-11-23 15:00"});
+      });
+      return id;
+    },
+    pick_convert_files: async()=>CONV_MOCKS[convBatch++ % CONV_MOCKS.length],
+    start_convert: async(items, opts={})=>{
+      const ids = [];
+      for(const it of items){
+        const id = "cv" + nextId++, fmt = (opts.fmt||"mp4").toUpperCase();
+        const mode = CONV_OUT.image.includes(opts.fmt) ? "image" : ["mp3","m4a","wav","flac","ogg","opus"].includes(opts.fmt) ? "audio" : "video";
+        const j = {id, kind:"convert", mode, title:it.name, site:"File", status:"queued", percent:0, quality:fmt,
+          folder: opts.dest_mode==="downloads" ? st.folder : it.folder, file:`${it.name.replace(/\.[^.]+$/,"")}.${opts.fmt}`};
+        ids.push(id);
+        runDemoJob(j, [{status:"converting",percent:32,eta:4},{status:"converting",percent:76,eta:1}], () => {
+          hist.unshift({title:j.title, url:"", thumbnail:mode==="image"?th:null, site:"File", mode, quality:fmt, file:j.file, folder:j.folder, date:"2026-11-23 15:00"});
+        });
+      }
+      return ids;
+    },
+    pick_transcribe_files: async()=>[
+      {path:"C:\\Users\\Andrea\\Music\\riunione_progetto.m4a", name:"riunione_progetto.m4a", folder:"C:\\Users\\Andrea\\Music", size:18400000},
+      {path:"C:\\Users\\Andrea\\Videos\\intervista_veloce.mp4", name:"intervista_veloce.mp4", folder:"C:\\Users\\Andrea\\Videos", size:52300000},
+    ],
+    transcribe_files: async(paths, ov={})=>{
+      const ids = [];
+      for(const p of paths){
+        const name = p.split(/[\\/]/).pop(), key = `${name}.txt`, id = "tr" + nextId++;
+        const diarOn = !!(ov?.diarize ?? demoW.diar_on);
+        demoTranscripts[key] = {
+          title: name.replace(/\.[^.]+$/,""), has_srt:true,
+          segments:[
+            {start:1, end:7, speaker: diarOn ? "Interlocutore 1" : "", text:`Inizio trascrizione locale per ${name}.`},
+            {start:8, end:15, speaker: diarOn ? "Interlocutore 2" : "", text:"I timestamp e gli interlocutori vengono generati offline su questo PC."},
+          ]
+        };
+        const j = {id, kind:"transcribe", mode:"text", title:name, site:"File", status:"queued", percent:0, quality:"Testo", file:key, folder:p.replace(/[^\\/]+$/,"")};
+        ids.push(id);
+        const steps = diarOn
+          ? [{status:"transcribing",percent:40,eta:4},{status:"transcribing",percent:88,eta:1},{status:"diarizing",percent:55,eta:2}]
+          : [{status:"transcribing",percent:45,eta:3},{status:"transcribing",percent:92,eta:1}];
+        runDemoJob(j, steps, () => {
+          hist.unshift({title:name, url:"", thumbnail:null, site:"File", mode:"text", quality:"Testo", file:key, folder:j.folder, date:"2026-11-23 15:00"});
+        });
+      }
+      return {ok:true, ids};
+    },
+    read_transcript: async(path)=>{
+      const d = demoTranscripts[path];
+      if(!d) return {ok:false, error:"File demo non trovato"};
+      return {ok:true, path, srt_path: path.replace(/\.txt$/,".srt"), has_srt:true, title:d.title, segments:d.segments.map(s=>({...s})),
+        raw: d.segments.map(s => `[${fmtDur(s.start)}] ${s.speaker ? s.speaker + ": " : ""}${s.text}`).join("\n")};
+    },
+    save_transcript: async(path, segs, ts, map)=>{
+      const d = demoTranscripts[path]; if(!d) return {ok:false, error:"File demo non trovato"};
+      const updated = segs.map(s => ({...s, speaker: (map && s.speaker && map[s.speaker]) ? map[s.speaker] : s.speaker}));
+      d.segments = updated;
+      return {ok:true, segments:updated, raw: updated.map(s => `${ts&&s.start!=null?`[${fmtDur(s.start)}] `:""}${s.speaker?s.speaker+": ":""}${s.text}`).join("\n")};
+    },
+    copy_text: async t=>{ try{ await navigator.clipboard?.writeText(t); }catch{} return true; },
+    cancel: async()=>1, retry: async()=>1,
+    clear_finished: async()=>1, clear_history: async()=>{ hist=[]; return 1; },
     open_file: async()=>true, open_folder: async()=>true, paste: async()=>"", choose_folder: async()=>null, update_ytdlp: async()=>({ok:true,message:"yt-dlp è aggiornato"}),
-    app_info: async()=>({version:"1.0.0", repo:"https://github.com/nonsonoAxel/AxGrab"}),
-    check_update: async()=>({ok:true, update:true, current:"1.0.0", latest:"1.1.0", page:"https://github.com/nonsonoAxel/AxGrab/releases/latest"}),
+    app_info: async()=>({version:"1.3.0", repo:"https://github.com/nonsonoAxel/AxTools"}),
+    check_update: async()=>({ok:true, update:false, current:"1.3.0", latest:"1.3.0", page:"https://github.com/nonsonoAxel/AxTools/releases/latest"}),
     open_url: async()=>1,
-    open_log: async()=>1, data_info: async()=>({path:"C:\\Users\\Tu\\AppData\\Local\\AxGrab", size:187e6, exe:"C:\\Users\\Tu\\Desktop\\AxGrab.exe"}), open_data_folder: async()=>1, uninstall: async()=>1,
+    open_log: async()=>1, data_info: async()=>({path:"C:\\Users\\Andrea\\AppData\\Local\\AxTools", size:720e6, exe:"C:\\Users\\Andrea\\Desktop\\AxTools.exe"}), open_data_folder: async()=>1, uninstall: async()=>1,
     win_drag: async()=>0, win_resize: async()=>0, win_minimize: async()=>0, win_close: async()=>0, win_toggle_max: async()=>(maxed=!maxed),
-    whisper_info: async()=>demoW, whisper_use: async f=>{demoW.current=f; return true;}, whisper_delete: async()=>true,
-    whisper_download: async id=>{ for(let d=0; d<=10; d++){ await new Promise(r=>setTimeout(r,120)); window.onBackend("model",{label:"Large-v3 Turbo",done:d*57e6,total:574e6}); }
+    whisper_info: async()=>({...demoW}), whisper_use: async f=>{demoW.current=f; return true;}, whisper_delete: async()=>true,
+    whisper_download: async id=>{ for(let d=0; d<=10; d++){ await new Promise(r=>setTimeout(r,90)); window.onBackend("model",{label:id,done:d*57e6,total:574e6}); }
       const m=demoW.models.find(x=>x.id===id); m.have=true; demoW.current=m.file; demoW.engine=true; return {ok:true,...demoW}; },
-    whisper_scan: async()=>{ await new Promise(r=>setTimeout(r,500)); return [{name:"ggml-large-v3.bin", size:552876044, family:"large-v3 (f16)", status:"unknown", path:"C:\\Users\\Tu\\AppData\\Roaming\\easy-whisper-electron\\whisper-workspace\\models\\ggml-large-v3.bin", why:"Non corrisponde a nessun modello ufficiale: probabilmente un download interrotto o un file modificato. Non viene usato."}]; },
-    whisper_import: async()=>({ok:false,error:"demo"}), transcribe_file: async()=>({ok:true}),
-    whisper_gpu: async on=>{ if(on && !demoW.gpu_installed){ for(let d=0; d<=10; d++){ await new Promise(r=>setTimeout(r,120)); window.onBackend("model",{label:"accelerazione NVIDIA",done:d*68e6,total:684e6}); } demoW.gpu_installed=true; demoW.gpu_disk=1155e6; }
+    whisper_scan: async()=>{ await new Promise(r=>setTimeout(r,350)); return [{name:"ggml-large-v3.bin", size:552876044, family:"large-v3 (f16)", status:"unknown", path:"C:\\Users\\Andrea\\AppData\\Roaming\\easy-whisper-electron\\whisper-workspace\\models\\ggml-large-v3.bin", why:"Non corrisponde a nessun modello ufficiale: probabilmente un download interrotto o un file modificato. Non viene usato."}]; },
+    whisper_import: async()=>({ok:false,error:"demo"}),
+    transcribe_file: async()=>{ window.pywebview?.api ? null : toast("Usa «Scegli file…» nella scheda Trascrivi", "var(--accent)"); return {ok:true}; },
+    whisper_gpu: async on=>{ if(on && !demoW.gpu_installed){ for(let d=0; d<=10; d++){ await new Promise(r=>setTimeout(r,90)); window.onBackend("model",{label:"accelerazione NVIDIA",done:d*68e6,total:684e6}); } demoW.gpu_installed=true; demoW.gpu_disk=1155e6; }
       demoW.gpu_on=on; return {ok:true,...demoW}; },
     whisper_gpu_delete: async()=>{ demoW.gpu_installed=false; demoW.gpu_on=false; demoW.gpu_disk=0; return {ok:true,...demoW}; },
+    whisper_diarize: async on=>{
+      if(on && !demoW.diar_installed){
+        for(let d=0; d<=10; d++){ await new Promise(r=>setTimeout(r,80)); window.onBackend("model",{label:"motore interlocutori",done:d*6.08e6,total:60839352}); }
+        demoW.diar_installed=true; demoW.diar_disk=60839352;
+      }
+      demoW.diar_on=on; st.whisper_diarize=on; return {ok:true,...demoW};
+    },
+    whisper_diarize_delete: async()=>{ demoW.diar_installed=false; demoW.diar_on=false; demoW.diar_disk=0; st.whisper_diarize=false; return {ok:true,...demoW}; },
   };
 }
 </script>

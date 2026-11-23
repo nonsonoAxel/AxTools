@@ -1,6 +1,6 @@
 """
-AxGrab — GUI leggera per yt-dlp (pywebview + HTML/CSS).
-Creato da nonsonoAxel · https://github.com/nonsonoAxel/AxGrab
+AxTools — GUI leggera per yt-dlp, convertitore e trascrizione offline (pywebview + HTML/CSS).
+Creato da nonsonoAxel · https://github.com/nonsonoAxel/AxTools
 
 Avvio in sviluppo:  python app.py      Build:  crea-exe.bat
 """
@@ -16,6 +16,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import threading
 import time
 import urllib.error
@@ -27,12 +28,13 @@ from pathlib import Path, PureWindowsPath
 
 import webview
 
+import convertitore
 import firma
 import trascrizione
 
-APP_NAME = "AxGrab"
-APP_VERSION = "1.2.2"           # da aumentare a ogni nuova release su GitHub (es. 1.0.1, 1.1.0)
-GITHUB_REPO = "nonsonoAxel/AxGrab"
+APP_NAME = "AxTools"
+APP_VERSION = "1.3.0"           # da aumentare a ogni nuova release su GitHub (es. 1.0.1, 1.1.0)
+GITHUB_REPO = "nonsonoAxel/AxTools"
 RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
 # Chiave pubblica con cui si controlla la firma degli aggiornamenti (vedi firma.py). Quella
@@ -73,12 +75,17 @@ YTDLP_DIR = BIN_DIR / "yt-dlp"
 FFMPEG_DIR = BIN_DIR / "ffmpeg"
 OWN_EXE = {"yt-dlp": YTDLP_DIR / "yt-dlp.exe", "ffmpeg": FFMPEG_DIR / "ffmpeg.exe",
            "deno": BIN_DIR / "deno.exe"}
+FFPROBE_EXE = FFMPEG_DIR / "ffprobe.exe"
 # trascrizione: motore e modelli si scaricano solo se qualcuno la usa
 WHISPER_DIR = BIN_DIR / "whisper"
 WHISPER_EXE = WHISPER_DIR / "whisper-cli.exe"
 WHISPER_GPU_DIR = BIN_DIR / "whisper-cuda"          # facoltativo: solo per chi ha una scheda NVIDIA
 WHISPER_GPU_EXE = WHISPER_GPU_DIR / "whisper-cli.exe"
 MODELS_DIR = DATA_DIR / "modelli"
+DIAR_DIR = BIN_DIR / "diarizzazione"
+DIAR_EXE = DIAR_DIR / "sherpa-onnx-offline-speaker-diarization.exe"
+DIAR_SEG_MODEL = DIAR_DIR / "pyannote-segmentation.onnx"
+DIAR_EMB_MODEL = DIAR_DIR / "wespeaker-embedding.onnx"
 
 # copia dei cookie dei soli siti video: evita di rileggere (e decifrare) il browser a ogni
 # analisi e permette di usarli anche quando un browser Chromium è aperto e blocca il suo file.
@@ -106,8 +113,15 @@ AUTH_ERRORS = ("sign in", "log in", "login", "logged-in", "cookies", "private", 
 
 NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
+_LEGACY_DIR = _LOCAL / "AxGrab"
+if not DATA_DIR.exists() and _LEGACY_DIR.is_dir() and not _LEGACY_DIR.is_symlink():
+    try:
+        _LEGACY_DIR.rename(DATA_DIR)
+    except OSError:
+        pass
+
 DATA_DIR.mkdir(parents=True, exist_ok=True)
-LOG_FILE = DATA_DIR / "axgrab.log"
+LOG_FILE = DATA_DIR / "axtools.log"
 # il log non cresce all'infinito: al massimo ~500 KB più una copia precedente
 _log_handler = logging.handlers.RotatingFileHandler(LOG_FILE, maxBytes=512_000, backupCount=1,
                                                     encoding="utf-8")
@@ -128,12 +142,18 @@ DEFAULT_SETTINGS = {
     "whisper_model": "",      # file del modello scelto per la trascrizione (in MODELS_DIR)
     "whisper_lang": "auto",   # lingua dell'audio: auto | it | en | ...
     "whisper_gpu": False,     # trascrizione sulla scheda NVIDIA (se il motore CUDA è scaricato)
+    "whisper_timestamps": False,
+    "whisper_diarize": False,
+    "whisper_speakers": 0,    # 0 = automatico | 2..6
+    "convert_dest": "same",   # same (accanto al file) | downloads (cartella download)
 }
 # valori ammessi: tutto il resto (da settings.json o dall'interfaccia) viene scartato
 ALLOWED_SETTINGS = {
     "mode": ("video", "audio", "thumb", "text"),
     "whisper_model": ("", *trascrizione.model_files()),
     "whisper_lang": trascrizione.LANGUAGES,
+    "whisper_speakers": (0, 2, 3, 4, 5, 6),
+    "convert_dest": ("same", "downloads"),
     "quality": ("best", "2160", "1440", "1080", "720", "480"),
     "audio_format": ("mp3", "m4a"),
     "cookies": ("none", "firefox", "zen", "helium", "chrome", "edge", "brave"),
@@ -142,9 +162,9 @@ ALLOWED_SETTINGS = {
 }
 URL_RE = re.compile(r"https?://[^\s\"<>]+\Z", re.I)
 # "Apri" avvia solo file di questo tipo, mai programmi o script
-MEDIA_EXT = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".flv", ".ts", ".m4v", ".3gp", ".gif",
-             ".m4a", ".mp3", ".opus", ".ogg", ".oga", ".flac", ".wav", ".aac", ".weba", ".mka",
-             ".jpg", ".jpeg", ".png", ".webp", ".txt", ".srt"}
+MEDIA_EXT = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".flv", ".ts", ".m4v", ".3gp", ".wmv", ".gif",
+             ".m4a", ".mp3", ".opus", ".ogg", ".oga", ".flac", ".wav", ".aac", ".wma", ".aiff", ".weba", ".mka",
+             ".jpg", ".jpeg", ".png", ".webp", ".ico", ".bmp", ".tif", ".tiff", ".txt", ".srt"}
 
 
 def valid_url(url) -> bool:
@@ -176,7 +196,7 @@ def clean_settings(data) -> dict:
             v = int(v)
         if type(v) in (str, int) and v in allowed:
             out[key] = v
-    for key in ("playlist", "whisper_gpu"):
+    for key in ("playlist", "whisper_gpu", "whisper_timestamps", "whisper_diarize"):
         if isinstance(data.get(key), bool):
             out[key] = data[key]
     folder = data.get("folder")
@@ -186,6 +206,55 @@ def clean_settings(data) -> dict:
     if isinstance(skip, str) and re.fullmatch(r"[0-9A-Za-z.\-]{0,30}", skip):
         out["skip_version"] = skip
     return out
+
+
+def parse_timecode(val) -> float | None:
+    """Converte 'SS', 'MM:SS' o 'H:MM:SS' in secondi (>= 0), oppure None se vuoto."""
+    if val is None or val == "":
+        return None
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
+        return float(val) if val >= 0 else None
+    if not isinstance(val, str):
+        return None
+    s = val.strip()
+    if not s:
+        return None
+    parts = s.split(":")
+    if len(parts) > 3:
+        return None
+    try:
+        nums = [float(p) for p in parts]
+    except ValueError:
+        return None
+    if any(n < 0 for n in nums):
+        return None
+    if len(nums) == 1:
+        return nums[0]
+    if len(nums) == 2:
+        m, sec = nums
+        return None if sec >= 60 or not m.is_integer() else m * 60 + sec
+    h, m, sec = nums
+    return None if sec >= 60 or m >= 60 or not (h.is_integer() and m.is_integer()) else h * 3600 + m * 60 + sec
+
+
+def _fmt_clip_sec(sec: float) -> str:
+    txt = f"{sec:.3f}".rstrip("0").rstrip(".")
+    return txt or "0"
+
+
+def build_clip_args(clip_start, clip_end, fast_cut=False) -> list[str]:
+    """Argomenti yt-dlp per ritagliare un intervallo temporale (Da - A)."""
+    s = parse_timecode(clip_start)
+    e = parse_timecode(clip_end)
+    if s is None and e is None:
+        return []
+    if s is not None and e is not None and e <= s:
+        raise ValueError("L'istante di fine deve essere successivo all'inizio.")
+    spec = f"*{_fmt_clip_sec(s or 0.0)}-{_fmt_clip_sec(e) if e is not None else 'inf'}"
+    args = ["--download-sections", spec]
+    if not fast_cut:
+        args.append("--force-keyframes-at-cuts")
+    return args
 
 
 def resource_path(rel: str) -> str:
@@ -286,7 +355,7 @@ def is_auth_error(msg: str) -> bool:
 
 
 def independent_env():
-    """Ambiente per avviare un'altra copia di AxGrab: senza le variabili che il bootloader di
+    """Ambiente per avviare un'altra copia di AxTools: senza le variabili che il bootloader di
     PyInstaller imposta per l'istanza in corso (altrimenti la nuova cerca la cartella _MEI della
     vecchia, già cancellata, e fallisce con 'Failed to load Python DLL')."""
     env = {k: v for k, v in os.environ.items()
@@ -357,6 +426,7 @@ class Api:
         self._scan = []                 # modelli Whisper trovati sul PC dall'ultima ricerca
         self._last_code = None          # codice d'uscita dell'ultimo whisper-cli, per il log
         self._procs = set()             # yt-dlp in esecuzione: vanno fermati alla chiusura
+        self._picked_files = set()      # file locali scelti esplicitamente dall'utente via dialog
         self._needs_cookies = {k: v for k, v in load_json(NEEDS_COOKIES_FILE, {}).items()
                                if isinstance(v, (int, float))}
         self._window = None
@@ -608,6 +678,38 @@ class Api:
         finally:
             user32.CloseClipboard()
 
+    def copy_text(self, text):
+        if not isinstance(text, str):
+            return False
+        data = (text + "\0").encode("utf-16-le")
+        for _ in range(10):
+            if user32.OpenClipboard(None):
+                break
+            time.sleep(0.02)
+        else:
+            return False
+        try:
+            user32.EmptyClipboard()
+            h = kernel32.GlobalAlloc(0x0042, len(data))     # GMEM_MOVEABLE | GMEM_ZEROINIT
+            if not h:
+                return False
+            p = kernel32.GlobalLock(h)
+            if not p:
+                kernel32.GlobalFree(h)
+                return False
+            try:
+                ctypes.memmove(p, data, len(data))
+            finally:
+                kernel32.GlobalUnlock(h)
+            if not user32.SetClipboardData(13, h):
+                kernel32.GlobalFree(h)
+                return False
+            return True
+        except Exception:
+            return False
+        finally:
+            user32.CloseClipboard()
+
     # ---------- anteprima ----------
     def _base_args(self, cookies=False, cookie_tmp=None):
         """cookies: False = nessuno · True = copia salvata se recente, altrimenti lettura dal browser
@@ -823,7 +925,7 @@ class Api:
             return (f"YouTube chiede la verifica anti-bot anche con i cookie di {b}. Controlla di aver fatto "
                     f"l'accesso a YouTube in {b}, oppure riprova tra un po'.")
         if "could not copy" in e and "cookie" in e:
-            return (f"{b} è aperto e blocca i suoi cookie. Chiudilo una volta e riprova: da quel momento AxGrab "
+            return (f"{b} è aperto e blocca i suoi cookie. Chiudilo una volta e riprova: da quel momento AxTools "
                     "li ricorda anche con il browser aperto.")
         if "dpapi" in e or "decrypt" in e:
             return f"{b} cifra i cookie in un modo che non si può leggere. Scegli un altro browser nelle Impostazioni."
@@ -938,23 +1040,44 @@ class Api:
     def start_download(self, url, info=None, overrides=None):
         if not valid_url(url):
             return None
-        opts = {**self.settings, **clean_settings(overrides)}
+        raw_ov = overrides if isinstance(overrides, dict) else {}
+        opts = {**self.settings, **clean_settings(raw_ov)}
         info = info if isinstance(info, dict) else {}
         title, thumb, site = info.get("title"), info.get("thumbnail"), info.get("site")
+        clip_start = raw_ov.get("clip_start") if opts["mode"] != "thumb" and not opts["playlist"] else None
+        clip_end = raw_ov.get("clip_end") if opts["mode"] != "thumb" and not opts["playlist"] else None
+        clip_fast = bool(raw_ov.get("clip_fast"))
+        try:
+            has_clip = bool(build_clip_args(clip_start, clip_end, clip_fast))
+        except ValueError:
+            return None
+        cs = parse_timecode(clip_start)
+        ce = parse_timecode(clip_end)
+        clip_lbl = (f"{trascrizione.format_timestamp(cs or 0)}–"
+                    f"{trascrizione.format_timestamp(ce) if ce is not None else 'fine'}") if has_clip else ""
+        kind = "transcribe" if raw_ov.get("from_transcribe") else "download"
+        tr_opts = {
+            "timestamps": bool(raw_ov.get("timestamps", opts.get("whisper_timestamps"))),
+            "diarize": bool(raw_ov.get("diarize", opts.get("whisper_diarize"))),
+            "speakers": int(raw_ov.get("speakers", opts.get("whisper_speakers") or 0)),
+        }
         job = self._new_job(
             url=url, title=title[:300] if isinstance(title, str) and title else url,
             thumbnail=thumb if valid_url(thumb) else None,
-            site=site[:40] if isinstance(site, str) else "", mode=opts["mode"],
+            site=site[:40] if isinstance(site, str) else "", mode=opts["mode"], kind=kind,
             quality="Testo" if opts["mode"] == "text" else "JPG" if opts["mode"] == "thumb" else
                     opts["audio_format"].upper() if opts["mode"] == "audio" else
                     ("Max" if opts["quality"] == "best" else opts["quality"] + "p"),
-            folder=opts["folder"])
+            clip=clip_lbl, clip_start=clip_start if has_clip else None,
+            clip_end=clip_end if has_clip else None, clip_fast=clip_fast if has_clip else False,
+            tr_opts=tr_opts, dl_overrides=clean_settings(raw_ov), folder=opts["folder"])
         threading.Thread(target=self._run_job, args=(job, opts), daemon=True).start()
         return job["id"]
 
     def _new_job(self, **fields):
-        job = {"id": uuid.uuid4().hex[:10], "url": "", "status": "queued", "percent": 0, "thumbnail": None,
-               "file": None, "proc": None, "cancel": False, "item": "", "speed": None, "eta": None, **fields}
+        job = {"id": uuid.uuid4().hex[:10], "url": "", "kind": "download", "status": "queued", "percent": 0,
+               "thumbnail": None, "file": None, "proc": None, "cancel": False, "item": "", "speed": None,
+               "eta": None, **fields}
         with self._lock:
             self._jobs[job["id"]] = job
         self._emit("job", self._public(job))
@@ -975,7 +1098,7 @@ class Api:
         self._emit("job", self._public(job))
 
     def _public(self, job):
-        return {k: v for k, v in job.items() if k not in ("proc",)}
+        return {k: v for k, v in job.items() if k not in ("proc", "conv_opts", "tr_opts", "dl_overrides")}
 
     def _run_job(self, job, opts):
         with self._slots:
@@ -984,6 +1107,7 @@ class Api:
             text_dir = None
             try:
                 Path(opts["folder"]).mkdir(parents=True, exist_ok=True)
+                clip_args = build_clip_args(job.get("clip_start"), job.get("clip_end"), job.get("clip_fast"))
                 if opts["mode"] == "text":
                     model = self._whisper_model_path()
                     if not model:
@@ -991,13 +1115,13 @@ class Api:
                     # l'audio va in una cartella temporanea: nella cartella dei download finisce solo il testo
                     text_dir = CACHE_DIR / f"tr-{job['id']}"
                     opts = {**opts, "playlist": False, "final_folder": opts["folder"], "folder": str(text_dir)}
-                # primo tentativo: l'analisi già fatta (con lo stesso uso dei cookie), poi il piano dei cookie
-                cached = self._take_cache(job["url"])
+                # primo tentativo: l'analisi già fatta (se non c'è ritaglio temporale), poi il piano dei cookie
+                cached = None if clip_args else self._take_cache(job["url"])
                 t0 = time.time()
 
                 def run(cookies, info_file):
                     job["percent"], ta = 0, time.time()
-                    code, err = self._run_proc(job, opts, cookies, info_file)
+                    code, err = self._run_proc(job, opts, cookies, info_file, clip_args)
                     log.info("download (cookie=%s, analisi salvata=%s): codice %s, %.1fs%s", cookies,
                              bool(info_file), code, time.time() - ta,
                              "" if code == 0 else " | " + log_safe(err.replace(job["url"], "")))
@@ -1016,7 +1140,7 @@ class Api:
                 if ok and opts["mode"] == "text" and not job["cancel"]:
                     audio = Path(job.get("file") or "")
                     out_base = Path(opts["final_folder"]) / (audio.stem or "trascrizione")
-                    ok, err = self._transcribe(job, audio, out_base)
+                    ok, err = self._transcribe(job, audio, out_base, job.get("tr_opts"))
                     tried = None              # l'errore, se c'è, è già un messaggio in italiano
                 if ok and opts["mode"] == "thumb" and not (job.get("file") and os.path.isfile(job["file"])):
                     ok, err = False, "Questo contenuto non ha una miniatura da scaricare."
@@ -1031,6 +1155,144 @@ class Api:
                     shutil.rmtree(text_dir, ignore_errors=True)    # audio temporaneo della trascrizione
             self._finish_job(job, ok, err)
 
+    # ---------- conversione locale (Converti) ----------
+    def pick_convert_files(self):
+        res = self._window.create_file_dialog(
+            webview.OPEN_DIALOG, allow_multiple=True,
+            file_types=(
+                "File multimediali (*.mp4;*.mkv;*.webm;*.mov;*.avi;*.flv;*.ts;*.m4v;*.3gp;*.wmv;"
+                "*.mp3;*.m4a;*.wav;*.flac;*.ogg;*.oga;*.opus;*.aac;*.wma;*.aiff;"
+                "*.png;*.jpg;*.jpeg;*.webp;*.ico;*.bmp;*.tif;*.tiff)",
+            ),
+        )
+        if not res:
+            return []
+        paths = list(res) if isinstance(res, (list, tuple)) else [res]
+        ffprobe = str(FFPROBE_EXE) if FFPROBE_EXE.exists() else None
+        out = []
+        for raw in paths:
+            p = Path(raw)
+            kind = convertitore.detect_kind(p)
+            if not kind or not p.is_file():
+                continue
+            self._picked_files.add(str(p))
+            meta = convertitore.probe_media(ffprobe, p)
+            try:
+                size = p.stat().st_size
+            except OSError:
+                size = 0
+            out.append({
+                "path": str(p), "name": p.name, "folder": str(p.parent),
+                "kind": kind, "ext": p.suffix.lstrip(".").lower(),
+                "size": size, "duration": meta["duration"], "dims": meta["dims"],
+            })
+        return out
+
+    def start_convert(self, items, options=None):
+        if not isinstance(items, list):
+            return []
+        opts = options if isinstance(options, dict) else {}
+        fmt = str(opts.get("fmt") or "").lower().lstrip(".")
+        dest_mode = "downloads" if opts.get("dest_mode") == "downloads" else "same"
+        clean_opts = {
+            "fmt": fmt,
+            "video_preset": str(opts.get("video_preset") or "balanced"),
+            "audio_kbps": int(opts.get("audio_kbps") or 192) if str(opts.get("audio_kbps") or "").isdigit() else 192,
+            "image_quality": int(opts.get("image_quality") or 85) if str(opts.get("image_quality") or "").isdigit() else 85,
+            "image_max_side": int(opts.get("image_max_side") or 0) if str(opts.get("image_max_side") or "").isdigit() else 0,
+            "dest_mode": dest_mode,
+        }
+        ids = []
+        for entry in items:
+            raw = entry.get("path") if isinstance(entry, dict) else entry
+            if not isinstance(raw, str) or (raw not in self._picked_files and not self._is_download(raw)):
+                continue
+            src = Path(raw)
+            kind = convertitore.detect_kind(src)
+            if not kind or not src.is_file() or fmt not in convertitore.allowed_outputs(kind):
+                continue
+            dur = entry.get("duration") if isinstance(entry, dict) else None
+            ids.append(self._start_convert_one(src, {**clean_opts, "duration": dur}))
+        return ids
+
+    def _start_convert_one(self, src: Path, opts: dict):
+        out_dir = Path(self.settings["folder"]) if opts.get("dest_mode") == "downloads" else src.parent
+        out_mode = convertitore.output_kind(opts["fmt"])
+        job = self._new_job(
+            title=src.name[:300], site="File", kind="convert", mode=out_mode,
+            quality=opts["fmt"].upper(), folder=str(out_dir), source=str(src), conv_opts=dict(opts),
+        )
+        threading.Thread(target=self._run_convert, args=(job, src, opts), daemon=True).start()
+        return job["id"]
+
+    def _run_convert(self, job, src: Path, opts: dict):
+        with self._slots:
+            if job["cancel"]:
+                return
+            dst = None
+            try:
+                kind = convertitore.detect_kind(src)
+                if not kind or not src.is_file():
+                    raise RuntimeError("File di origine non trovato.")
+                out_dir = Path(self.settings["folder"]) if opts.get("dest_mode") == "downloads" else src.parent
+                out_dir.mkdir(parents=True, exist_ok=True)
+                dst = convertitore.unique_dest(src, opts["fmt"], out_dir)
+                job["folder"] = str(out_dir)
+
+                if kind == "image":
+                    job.update(status="converting", percent=50, speed=None, eta=None)
+                    self._emit("job", self._public(job))
+                    convertitore.convert_image(src, dst, opts["fmt"], opts.get("image_quality", 85),
+                                               opts.get("image_max_side", 0))
+                    job["file"] = str(dst)
+                    ok, err = dst.is_file(), "" if dst.is_file() else "Immagine non salvata."
+                else:
+                    ff = self._exe("ffmpeg")
+                    if not ff:
+                        raise RuntimeError("ffmpeg non installato")
+                    dur = opts.get("duration")
+                    if not dur:
+                        ffp = str(FFPROBE_EXE) if FFPROBE_EXE.exists() else None
+                        dur = convertitore.probe_media(ffp, src).get("duration")
+                    cmd = convertitore.build_ffmpeg_cmd(ff, src, dst, kind, opts["fmt"], opts, dur)
+                    job.update(status="converting", percent=0, speed=None, eta=None)
+                    self._emit("job", self._public(job))
+                    t0, last_emit, tail = time.time(), 0.0, []
+                    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                            text=True, encoding="utf-8", errors="replace",
+                                            creationflags=NO_WINDOW, bufsize=1)
+                    job["proc"] = proc
+                    for line in proc.stdout:
+                        line = line.rstrip()
+                        t_sec = convertitore.parse_ffmpeg_time_us(line)
+                        if t_sec is not None and dur and dur > 0:
+                            pct = min(99.0, max(0.0, t_sec / dur * 100.0))
+                            job["percent"] = pct
+                            elapsed = time.time() - t0
+                            if pct > 1.5 and elapsed > 0.2:
+                                job["eta"] = elapsed * (100.0 - pct) / pct
+                            now = time.time()
+                            if now - last_emit > 0.25:
+                                last_emit = now
+                                self._emit("job", self._public(job))
+                        elif line and "=" not in line:
+                            tail = (tail + [line])[-5:]
+                    proc.wait()
+                    if job["cancel"]:
+                        unlink_quiet(dst)
+                        ok, err = False, "Annullato"
+                    elif proc.returncode == 0 and dst.is_file():
+                        job["file"] = str(dst)
+                        ok, err = True, ""
+                    else:
+                        unlink_quiet(dst)
+                        ok, err = False, (" | ".join(tail)[-200:] or f"Errore ffmpeg (codice {proc.returncode})")
+            except Exception as e:
+                if dst:
+                    unlink_quiet(dst)
+                ok, err = False, str(e)
+            self._finish_job(job, ok, err)
+
     # ---------- trascrizione (Whisper) ----------
     def _whisper_model_path(self):
         """Il modello scelto, solo se il motore c'è e il file è uno di quelli verificati in MODELS_DIR."""
@@ -1040,14 +1302,18 @@ class Api:
             return path
         return None
 
-    def _transcribe(self, job, src: Path, out_base: Path):
+    def _transcribe(self, job, src: Path, out_base: Path, tr_opts=None):
         """Converte l'audio nel formato di Whisper (WAV 16 kHz mono), lo trascrive e salva .txt e .srt.
-        Restituisce (ok, errore)."""
+        Se attiva la separazione interlocutori (sherpa-onnx), etichetta i turni prima di scrivere."""
         model = self._whisper_model_path()
         if not model:
             return False, "Per la trascrizione scegli prima un modello: Impostazioni → Trascrizione."
         if not src.is_file():
             return False, "Non trovo l'audio da trascrivere."
+        tr_opts = tr_opts or {}
+        timestamps = bool(tr_opts.get("timestamps") if "timestamps" in tr_opts else self.settings.get("whisper_timestamps"))
+        diarize = bool(tr_opts.get("diarize") if "diarize" in tr_opts else self.settings.get("whisper_diarize"))
+        speakers = int(tr_opts.get("speakers") if "speakers" in tr_opts else self.settings.get("whisper_speakers") or 0)
         wav = CACHE_DIR / f"tr-{job['id']}.wav"
         # whisper-cli non sa scrivere file con emoji o caratteri non latini nel nome (es. molti
         # titoli YouTube): scrive qui con un nome semplice, poi i file vengono spostati con il titolo vero
@@ -1058,9 +1324,12 @@ class Api:
             out_base = out_base.with_name(f"{out_base.name.rsplit(' (', 1)[0]} ({n})")   # non sovrascrive
             n += 1
         try:
+            ff = self._exe("ffmpeg")
+            if not ff:
+                return False, "ffmpeg non installato."
             job.update(status="processing", percent=0, speed=None, eta=None)
             self._emit("job", self._public(job))
-            conv = subprocess.run([self._exe("ffmpeg"), "-nostdin", "-y", "-v", "error", "-i", str(src),
+            conv = subprocess.run([ff, "-nostdin", "-y", "-v", "error", "-i", str(src),
                                    "-vn", "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", str(wav)],
                                   capture_output=True, text=True, encoding="utf-8", errors="replace",
                                   creationflags=NO_WINDOW, timeout=1800)
@@ -1077,16 +1346,39 @@ class Api:
                 if job["cancel"]:
                     return False, "Annullato"
                 if ok:
-                    for ext in (".txt", ".srt"):
-                        if work.with_suffix(ext).is_file():
-                            shutil.move(str(work.with_suffix(ext)), str(out_base.with_suffix(ext)))
+                    srt_work, txt_work = work.with_suffix(".srt"), work.with_suffix(".txt")
+                    segments = trascrizione.parse_srt(srt_work.read_text(encoding="utf-8", errors="replace")) if srt_work.is_file() else []
+                    if not segments and txt_work.is_file():
+                        raw_t = txt_work.read_text(encoding="utf-8", errors="replace").strip()
+                        if raw_t:
+                            segments = [{"start": 0.0, "end": seconds, "speaker": "", "text": raw_t}]
+                    if diarize and segments:
+                        if self._diar_installed():
+                            diar_ok, turns = self._run_diarization(job, wav, speakers)
+                            if job["cancel"]:
+                                return False, "Annullato"
+                            if diar_ok and turns:
+                                segments = trascrizione.assign_speakers(segments, turns)
+                            elif not diar_ok:
+                                job["warning"] = "Separazione interlocutori non riuscita: trascrizione salvata senza nomi."
+                        else:
+                            job["warning"] = "Motore interlocutori non installato: trascrizione salvata senza nomi."
+
+                    if segments:
+                        txt.write_text(trascrizione.format_txt(segments, timestamps=timestamps, speakers=True), encoding="utf-8")
+                        out_base.with_suffix(".srt").write_text(trascrizione.format_srt(segments, include_speakers=True), encoding="utf-8")
+                    else:
+                        for ext in (".txt", ".srt"):
+                            if work.with_suffix(ext).is_file():
+                                shutil.move(str(work.with_suffix(ext)), str(out_base.with_suffix(ext)))
+
                     if kind == "gpu" and not used_gpu:
                         # testo pronto, ma la scheda non è stata usata (es. driver vecchio): niente da rifare
                         job["warning"] = ("La scheda NVIDIA non è stata usata: la trascrizione è andata sul "
                                           "processore. Aggiornare il driver NVIDIA di solito risolve.")
-                    log.info("trascrizione: %.0fs di audio in %.1fs (%.3fx), modello %s, lingua %s, %s",
+                    log.info("trascrizione: %.0fs di audio in %.1fs (%.3fx), modello %s, lingua %s, %s, diar=%s",
                              seconds, secs, secs / seconds, model.name, self.settings.get("whisper_lang"),
-                             "GPU" if used_gpu else "processore")
+                             "GPU" if used_gpu else "processore", diarize)
                     job["file"] = str(txt)
                     return True, ""
                 log.warning("trascrizione %s non riuscita (codice %s, testo scritto: %s): %s", kind,
@@ -1097,6 +1389,49 @@ class Api:
             return False, "La trascrizione non è riuscita. Riprova, o prova un modello diverso."
         finally:
             unlink_quiet(wav, *outputs)
+
+    def _run_diarization(self, job, wav: Path, num_speakers: int = 0):
+        """Esegue sherpa-onnx-offline-speaker-diarization.exe su WAV 16 kHz mono."""
+        args = [
+            str(DIAR_EXE),
+            f"--segmentation.pyannote-model={short_path(DIAR_SEG_MODEL)}",
+            f"--embedding.model={short_path(DIAR_EMB_MODEL)}",
+        ]
+        if num_speakers > 0:
+            args.append(f"--clustering.num-clusters={num_speakers}")
+        args.append(short_path(wav))
+        job.update(status="diarizing", percent=0, eta=None)
+        self._emit("job", self._public(job))
+        t0, last_emit, turns = time.time(), 0.0, []
+        try:
+            proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                    encoding="utf-8", errors="replace", creationflags=NO_WINDOW,
+                                    cwd=str(DIAR_DIR), bufsize=1)
+            job["proc"] = proc
+            for line in proc.stdout:
+                pm = trascrizione.DIAR_PROGRESS_RE.search(line)
+                if pm:
+                    job["percent"] = min(99.0, float(pm.group(1)))
+                    if job["percent"] > 2:
+                        job["eta"] = (time.time() - t0) * (100 - job["percent"]) / job["percent"]
+                    if time.time() - last_emit > 0.35:
+                        last_emit = time.time()
+                        self._emit("job", self._public(job))
+                else:
+                    lm = trascrizione.DIAR_LINE_RE.match(line)
+                    if lm:
+                        turns.append((float(lm.group(1)), float(lm.group(2)), int(lm.group(3))))
+            proc.wait()
+            return proc.returncode == 0, turns
+        except Exception as e:
+            log.warning("diarizzazione non riuscita: %s", e)
+            return False, []
+
+    def _diar_installed(self):
+        return all(p.is_file() for p in (DIAR_EXE, DIAR_SEG_MODEL, DIAR_EMB_MODEL))
+
+    def _diar_ready(self):
+        return bool(self.settings.get("whisper_diarize")) and self._diar_installed()
 
     def _run_whisper(self, job, exe, model, wav, out_base, gpu):
         """Una esecuzione di whisper-cli. Restituisce (ok, GPU usata davvero, ultime righe, secondi)."""
@@ -1134,6 +1469,47 @@ class Api:
     def _gpu_ready(self):
         return bool(self.settings.get("whisper_gpu")) and WHISPER_GPU_EXE.exists() and self._system()["nvidia"]
 
+    def pick_transcribe_files(self):
+        res = self._window.create_file_dialog(
+            webview.OPEN_DIALOG, allow_multiple=True,
+            file_types=("Audio e video (*.mp3;*.m4a;*.wav;*.mp4;*.mkv;*.webm;*.mov;*.ogg;*.opus;*.flac;*.aac)",),
+        )
+        if not res:
+            return []
+        paths = list(res) if isinstance(res, (list, tuple)) else [res]
+        out = []
+        for raw in paths:
+            p = Path(raw)
+            if not p.is_file():
+                continue
+            self._picked_files.add(str(p))
+            try:
+                size = p.stat().st_size
+            except OSError:
+                size = 0
+            out.append({"path": str(p), "name": p.name, "folder": str(p.parent), "size": size})
+        return out
+
+    def transcribe_files(self, paths, overrides=None):
+        if not self._whisper_model_path():
+            return {"ok": False, "error": "Per la trascrizione scegli prima un modello: Impostazioni → Trascrizione."}
+        if not isinstance(paths, list):
+            return {"ok": False, "error": "Nessun file selezionato."}
+        opts = overrides if isinstance(overrides, dict) else {}
+        tr_opts = {
+            "timestamps": bool(opts.get("timestamps", self.settings.get("whisper_timestamps"))),
+            "diarize": bool(opts.get("diarize", self.settings.get("whisper_diarize"))),
+            "speakers": int(opts.get("speakers", self.settings.get("whisper_speakers") or 0)),
+        }
+        ids = []
+        for raw in paths:
+            if not isinstance(raw, str) or (raw not in self._picked_files and not self._is_download(raw)):
+                continue
+            p = Path(raw)
+            if p.is_file():
+                ids.append(self._transcribe_local(p, tr_opts))
+        return {"ok": True, "ids": ids}
+
     def transcribe_file(self):
         """Trascrive un file audio o video già presente sul PC, scelto con la finestra di Windows."""
         if not self._whisper_model_path():
@@ -1145,19 +1521,77 @@ class Api:
         self._transcribe_local(Path(res[0] if isinstance(res, (list, tuple)) else res))
         return {"ok": True}
 
-    def _transcribe_local(self, src: Path):
-        job = self._new_job(title=src.name[:300], site="File", mode="text", quality="Testo",
-                            folder=str(src.parent), source=str(src))
+    def _transcribe_local(self, src: Path, tr_opts=None):
+        tr_opts = tr_opts or {
+            "timestamps": bool(self.settings.get("whisper_timestamps")),
+            "diarize": bool(self.settings.get("whisper_diarize")),
+            "speakers": int(self.settings.get("whisper_speakers") or 0),
+        }
+        job = self._new_job(title=src.name[:300], site="File", kind="transcribe", mode="text",
+                            quality="Testo", folder=str(src.parent), source=str(src), tr_opts=tr_opts)
 
         def work():
             with self._slots:
+                if job["cancel"]:
+                    return
                 try:
-                    ok, err = self._transcribe(job, src, src.with_suffix(""))
+                    ok, err = self._transcribe(job, src, src.with_suffix(""), job.get("tr_opts"))
                 except Exception as e:
                     ok, err = False, str(e)
                 self._finish_job(job, ok, err)
         threading.Thread(target=work, daemon=True).start()
         return job["id"]
+
+    def read_transcript(self, path):
+        if not self._is_download(path):
+            return {"ok": False, "error": "File non riconosciuto."}
+        p = Path(path)
+        if p.suffix.lower() not in (".txt", ".srt") or not p.is_file():
+            return {"ok": False, "error": "File di trascrizione non trovato."}
+        txt_p, srt_p = p.with_suffix(".txt"), p.with_suffix(".srt")
+        raw_txt = txt_p.read_text(encoding="utf-8", errors="replace") if txt_p.is_file() else ""
+        if srt_p.is_file():
+            segments = trascrizione.parse_srt(srt_p.read_text(encoding="utf-8", errors="replace"))
+        else:
+            segments = trascrizione.parse_plain_txt(raw_txt)
+        return {
+            "ok": True,
+            "path": str(txt_p if txt_p.is_file() else p),
+            "srt_path": str(srt_p) if srt_p.is_file() else None,
+            "has_srt": srt_p.is_file(),
+            "title": p.stem,
+            "segments": segments,
+            "raw": raw_txt,
+        }
+
+    def save_transcript(self, path, segments, timestamps=False, speaker_map=None):
+        if not self._is_download(path):
+            return {"ok": False, "error": "File non riconosciuto."}
+        p = Path(path)
+        if p.suffix.lower() not in (".txt", ".srt") or not isinstance(segments, list):
+            return {"ok": False, "error": "Dati non validi."}
+        clean_segs = []
+        for s in segments:
+            if not isinstance(s, dict):
+                continue
+            txt = str(s.get("text") or "").strip()
+            if not txt:
+                continue
+            clean_segs.append({
+                "start": s.get("start"),
+                "end": s.get("end"),
+                "speaker": str(s.get("speaker") or "").strip()[:40],
+                "text": txt,
+            })
+        updated = trascrizione.apply_speaker_map(clean_segs, speaker_map)
+        txt_out = trascrizione.format_txt(updated, timestamps=bool(timestamps), speakers=True)
+        txt_p, srt_p = p.with_suffix(".txt"), p.with_suffix(".srt")
+        txt_p.write_text(txt_out, encoding="utf-8")
+        if srt_p.is_file():
+            srt_out = trascrizione.format_srt(updated, include_speakers=True)
+            if srt_out:
+                srt_p.write_text(srt_out, encoding="utf-8")
+        return {"ok": True, "segments": updated, "raw": txt_out}
 
     def _system(self):
         if self._sysinfo is None:
@@ -1203,6 +1637,11 @@ class Api:
                 "lang": self.settings.get("whisper_lang"), "system": sysinfo, "disk": used,
                 "gpu_installed": WHISPER_GPU_EXE.exists(), "gpu_on": gpu_on,
                 "gpu_disk": dir_size(WHISPER_GPU_DIR) if WHISPER_GPU_DIR.is_dir() else 0,
+                "diar_installed": self._diar_installed(), "diar_on": self._diar_ready(),
+                "diar_disk": dir_size(DIAR_DIR) if DIAR_DIR.is_dir() else 0,
+                "diar_size": trascrizione.DIAR_TOTAL_SIZE,
+                "timestamps": bool(self.settings.get("whisper_timestamps")),
+                "speakers": int(self.settings.get("whisper_speakers") or 0),
                 "recommended": trascrizione.recommend(sysinfo["ram"], sysinfo["cores"], sysinfo["nvidia"])}
 
     def _install_whisper(self, gpu=False):
@@ -1253,6 +1692,86 @@ class Api:
         """Toglie il motore CUDA (circa 1,1 GB su disco): si torna al processore."""
         self.save_settings({"whisper_gpu": False})
         shutil.rmtree(WHISPER_GPU_DIR, ignore_errors=True)
+        return {"ok": True, **self.whisper_info()}
+
+    def _extract_tar_bz2(self, url, label, dest_dir: Path, keep, expected_sha, event="model"):
+        """Scarica un archivio .tar.bz2, ne verifica l'impronta SHA-256 ed estrae i file richiesti."""
+        tpath = BIN_DIR / f"{label.replace(' ', '_')}.tar.bz2"
+        try:
+            self._download_file(url, tpath, label, event=event)
+            if trascrizione.sha256_file(tpath) != expected_sha.lower():
+                raise ValueError(f"{label}: il file scaricato è rovinato o non corrisponde all'impronta.")
+            self._emit(event, {"label": f"Estrazione {label}", "done": 1, "total": 1})
+            with tarfile.open(tpath, "r:bz2") as tf:
+                for m in tf.getmembers():
+                    if not m.isfile():
+                        continue
+                    rel = keep(m.name)
+                    if not rel:
+                        continue
+                    relp = PureWindowsPath(rel)
+                    if relp.is_absolute() or relp.drive or relp.root or ".." in relp.parts or not relp.parts:
+                        raise ValueError(f"{label}: percorso non valido nell'archivio ({m.name})")
+                    out = dest_dir / relp
+                    out.parent.mkdir(parents=True, exist_ok=True)
+                    with tf.extractfile(m) as src, open(out, "wb") as dst:
+                        shutil.copyfileobj(src, dst)
+        finally:
+            unlink_quiet(tpath)
+
+    def _install_diarization(self):
+        tmp = DIAR_DIR.with_name(DIAR_DIR.name + ".new")
+        shutil.rmtree(tmp, ignore_errors=True)
+        tmp.mkdir(parents=True, exist_ok=True)
+        try:
+            self._extract_tar_bz2(
+                trascrizione.DIAR_ENGINE_URL, "motore interlocutori", tmp,
+                lambda n: n.replace("\\", "/").split("/")[-1]
+                if n.replace("\\", "/").split("/")[-1] in trascrizione.DIAR_ENGINE_FILES else None,
+                trascrizione.DIAR_ENGINE_SHA, event="model",
+            )
+            self._extract_tar_bz2(
+                trascrizione.DIAR_SEG_URL, "modello segmentazione", tmp,
+                lambda n: "pyannote-segmentation.onnx" if n.replace("\\", "/").endswith("/model.onnx") else None,
+                trascrizione.DIAR_SEG_SHA, event="model",
+            )
+            emb_tmp = tmp / "wespeaker-embedding.onnx.part"
+            self._download_file(trascrizione.DIAR_EMB_URL, emb_tmp, "modello voci", event="model")
+            if trascrizione.sha256_file(emb_tmp) != trascrizione.DIAR_EMB_SHA.lower():
+                raise ValueError("modello voci: il file scaricato non corrisponde all'impronta.")
+            os.replace(emb_tmp, tmp / "wespeaker-embedding.onnx")
+
+            if not all((tmp / f).is_file() for f in (
+                *trascrizione.DIAR_ENGINE_FILES, "pyannote-segmentation.onnx", "wespeaker-embedding.onnx"
+            )):
+                raise ValueError("installazione separazione interlocutori incompleta.")
+            old = DIAR_DIR.with_name(DIAR_DIR.name + ".old")
+            shutil.rmtree(old, ignore_errors=True)
+            if DIAR_DIR.exists():
+                DIAR_DIR.rename(old)
+            tmp.rename(DIAR_DIR)
+            shutil.rmtree(old, ignore_errors=True)
+        except Exception:
+            shutil.rmtree(tmp, ignore_errors=True)
+            raise
+
+    def whisper_diarize(self, enable):
+        if not enable:
+            self.save_settings({"whisper_diarize": False})
+            return {"ok": True, **self.whisper_info()}
+        try:
+            if not self._diar_installed():
+                self._install_diarization()
+            self.save_settings({"whisper_diarize": True})
+            log.info("separazione interlocutori attivata")
+            return {"ok": True, **self.whisper_info()}
+        except Exception as e:
+            log.exception("motore interlocutori non installato")
+            return {"ok": False, "error": str(e)}
+
+    def whisper_diarize_delete(self):
+        self.save_settings({"whisper_diarize": False})
+        shutil.rmtree(DIAR_DIR, ignore_errors=True)
         return {"ok": True, **self.whisper_info()}
 
     def whisper_download(self, model_id, english=False):
@@ -1332,19 +1851,20 @@ class Api:
             return entry[0], entry[2]          # (file dell'analisi, usava i cookie)
         return None
 
-    def _run_proc(self, job, opts, cookies, info_file=None):
+    def _run_proc(self, job, opts, cookies, info_file=None, clip_args=None):
         """Esegue yt-dlp una volta; restituisce (codice di uscita, ultimo errore)."""
         tmp = self._new_cookie_tmp() if cookies else None
         try:
-            return self._download_once(job, opts, cookies, info_file, tmp)
+            return self._download_once(job, opts, cookies, info_file, tmp, clip_args)
         finally:
             if tmp:
                 self._store_cookies(tmp)
 
-    def _download_once(self, job, opts, cookies, info_file, tmp):
+    def _download_once(self, job, opts, cookies, info_file, tmp, clip_args=None):
         # "--" chiude le opzioni: quello che segue è sempre trattato come link
         source = ["--load-info-json", str(info_file)] if info_file else ["--", job["url"]]
         args = [self._exe("yt-dlp"), *self._base_args(cookies, tmp), *self._format_args(opts),
+                *(clip_args or []),
                 "-N", "4",   # frammenti in parallelo (HLS/DASH: Instagram, TikTok, Twitch, X…)
                 "--yes-playlist" if opts["playlist"] else "--no-playlist",
                 "-P", opts["folder"],
@@ -1418,14 +1938,26 @@ class Api:
         job = self._jobs.pop(job_id, None)
         if not job:
             return None
+        if job.get("kind") == "convert" and job.get("source"):
+            return self._start_convert_one(Path(job["source"]), dict(job.get("conv_opts") or {"fmt": job["quality"].lower()}))
         if job.get("source"):
-            return self._transcribe_local(Path(job["source"]))
+            return self._transcribe_local(Path(job["source"]), job.get("tr_opts"))
+        ov = dict(job.get("dl_overrides") or {})
+        if job.get("clip_start") is not None:
+            ov["clip_start"] = job["clip_start"]
+        if job.get("clip_end") is not None:
+            ov["clip_end"] = job["clip_end"]
+        if job.get("clip_fast"):
+            ov["clip_fast"] = True
+        if job.get("kind") == "transcribe":
+            ov["from_transcribe"] = True
         return self.start_download(job["url"], {"title": job["title"], "thumbnail": job["thumbnail"],
-                                                "site": job["site"]})
+                                                "site": job["site"]}, ov or None)
 
-    def clear_finished(self):
+    def clear_finished(self, kind=None):
         with self._lock:
-            for k in [k for k, j in self._jobs.items() if j["status"] in ("done", "error", "cancelled")]:
+            for k in [k for k, j in self._jobs.items()
+                      if j["status"] in ("done", "error", "cancelled") and (not kind or j.get("kind") == kind)]:
                 del self._jobs[k]
         return True
 
@@ -1458,7 +1990,7 @@ class Api:
 
     # ---------- file ----------
     def _is_download(self, path) -> bool:
-        """Il percorso è quello di un file scaricato da AxGrab (in coda o in cronologia)."""
+        """Il percorso è quello di un file gestito da AxTools (in coda o in cronologia)."""
         if not isinstance(path, str) or not path:
             return False
         known = {j.get("file") for j in list(self._jobs.values())} | {h.get("file") for h in self.history}
@@ -1638,7 +2170,7 @@ class Api:
                 "notes": (rel.get("body") or "")[:600]}
 
     def apply_update(self):
-        """Scarica il nuovo AxGrab.exe dalla release, lo verifica, sostituisce quello in uso
+        """Scarica il nuovo AxTools.exe dalla release, lo verifica, sostituisce quello in uso
         dopo la chiusura e riavvia l'app."""
         info = self.check_update()
         if not info.get("ok"):
@@ -1651,7 +2183,7 @@ class Api:
             self.open_url(info.get("page") or RELEASES_PAGE)
             return {"ok": True, "manual": True}
         # Prima di scaricare: la release deve avere una firma valida, fatta con la chiave di chi
-        # pubblica AxGrab e per questa precisa versione. La firma dice anche quale impronta e
+        # pubblica AxTools e per questa precisa versione. La firma dice anche quale impronta e
         # quale dimensione deve avere l'EXE. Se manca o non torna non si installa niente e non si
         # apre nemmeno la pagina: una release non firmata potrebbe non essere autentica.
         try:
@@ -1663,21 +2195,21 @@ class Api:
         except urllib.error.HTTPError as e:
             log.error("aggiornamento rifiutato: firma non scaricabile (%s)", e.code)
             return {"ok": False, "error": "questa release non ha una firma scaricabile. "
-                                          "Non installarla e avvisa chi ti ha dato AxGrab."}
+                                          "Non installarla e avvisa chi ti ha dato AxTools."}
         except OSError as e:                 # rete assente o lenta: non è un problema della release
             return {"ok": False, "error": f"non riesco a scaricare la firma della release ({e}). Riprova più tardi."}
         except Exception as e:
             log.error("aggiornamento rifiutato: %s", e)
             return {"ok": False, "error": f"questa release non è firmata come dovrebbe ({e}). "
-                                          "Non installarla e avvisa chi ti ha dato AxGrab."}
+                                          "Non installarla e avvisa chi ti ha dato AxTools."}
         exe = Path(sys.executable)
         new = exe.with_name(exe.stem + ".new.exe")
         try:
             try:
-                self._download_file(url, new, f"AxGrab {info['latest']}", event="update")
+                self._download_file(url, new, f"AxTools {info['latest']}", event="update")
             except PermissionError:          # cartella dell'EXE non scrivibile: uso la cartella temporanea
-                new = Path(os.environ.get("TEMP", str(DATA_DIR))) / "AxGrab.new.exe"
-                self._download_file(url, new, f"AxGrab {info['latest']}", event="update")
+                new = Path(os.environ.get("TEMP", str(DATA_DIR))) / "AxTools.new.exe"
+                self._download_file(url, new, f"AxTools {info['latest']}", event="update")
             data = new.read_bytes()
             if len(data) < 1_000_000 or data[:2] != b"MZ":
                 raise ValueError("il file scaricato non è un EXE valido")
@@ -1692,7 +2224,7 @@ class Api:
             return {"ok": False, "error": str(e)}
 
         log.info("aggiornamento %s -> %s: riavvio", APP_VERSION, info["latest"])
-        env = independent_env()          # la nuova AxGrab non deve ereditare lo stato di questa
+        env = independent_env()          # la nuova AxTools non deve ereditare lo stato di questa
         env.update(AXG_PIDS=f"{os.getpid()},{os.getppid()}", AXG_NEW=str(new), AXG_EXE=str(exe))
         self._detached_powershell(UPDATE_PS, env)
         threading.Timer(0.5, self._window.destroy).start()
@@ -1707,7 +2239,7 @@ class Api:
                "-EncodedCommand", base64.b64encode(script.encode("utf-16-le")).decode("ascii")]
         base = NO_WINDOW | 0x00000200          # nessuna finestra, gruppo di processi separato
         try:
-            # esce dal "job" dell'app, così non viene chiuso quando AxGrab termina
+            # esce dal "job" dell'app, così non viene chiuso quando AxTools termina
             subprocess.Popen(cmd, creationflags=base | 0x01000000, close_fds=True, env=env)
         except OSError:
             subprocess.Popen(cmd, creationflags=base, close_fds=True, env=env)
@@ -1728,7 +2260,7 @@ class Api:
     def _diagnostics(self):
         """Nel log: dati del PC e quanto ci mette yt-dlp solo ad avviarsi (antivirus, disco lento…)."""
         import platform
-        log.info("sistema: Windows %s, %s core, AxGrab %s", platform.version(), os.cpu_count(),
+        log.info("sistema: Windows %s, %s core, AxTools %s", platform.version(), os.cpu_count(),
                  "exe" if getattr(sys, "frozen", False) else "sviluppo")
         exe = self._exe("yt-dlp")
         if exe:
@@ -1739,7 +2271,7 @@ class Api:
 
     def uninstall(self):
         """Elimina dati in AppData, l'EXE e i suoi collegamenti, dopo la chiusura dell'app."""
-        # la cartella da eliminare deve essere proprio quella dei dati di AxGrab
+        # la cartella da eliminare deve essere proprio quella dei dati di AxTools
         if not DATA_DIR.is_absolute() or DATA_DIR.name != APP_NAME or DATA_DIR.is_symlink() \
                 or DATA_DIR.is_junction():
             log.error("disinstallazione annullata: cartella dati inattesa (%s)", DATA_DIR)
@@ -1747,13 +2279,13 @@ class Api:
         # ultima conferma con una finestra di Windows: non basta che la chieda la pagina
         answer = user32.MessageBoxW(
             self._hwnd or None,
-            "Disinstallare AxGrab?\n\nVerranno eliminati l'app, i suoi dati e i collegamenti.\n"
+            "Disinstallare AxTools?\n\nVerranno eliminati l'app, i suoi dati e i collegamenti.\n"
             "I video e gli audio scaricati restano dove sono.",
-            "Disinstalla AxGrab", 0x4 | 0x30 | 0x100)      # Sì/No, avviso, predefinito: No
+            "Disinstalla AxTools", 0x4 | 0x30 | 0x100)      # Sì/No, avviso, predefinito: No
         if answer != 6:
             return False
         for j in list(self._jobs.values()):
-            if j["status"] in ("queued", "downloading", "processing"):
+            if j["status"] in ("queued", "downloading", "processing", "transcribing", "diarizing", "converting"):
                 self.cancel(j["id"])
         # collegamenti (giunzioni) dentro la cartella dati: si toglie il collegamento, non ciò a
         # cui punta. Il PowerShell di Windows altrimenti li seguirebbe cancellando la destinazione.
@@ -1796,7 +2328,7 @@ if ($new -and $exe) {
 UNINSTALL_PS = _PS_WAIT + r'''
 Start-Sleep -Seconds 1
 $data = $env:AXG_DATA; $exe = $env:AXG_EXE
-if ($data -and (Split-Path -Leaf $data) -eq 'AxGrab') {
+if ($data -and (Split-Path -Leaf $data) -eq 'AxTools') {
   Remove-Item -LiteralPath $data -Recurse -Force -ErrorAction SilentlyContinue }
 if ($exe) {
   Remove-Item -LiteralPath $exe -Force -ErrorAction SilentlyContinue
@@ -1815,9 +2347,17 @@ user32.ShowWindow.argtypes = [wt.HWND, ctypes.c_int]
 user32.MonitorFromWindow.argtypes = [wt.HWND, wt.DWORD]
 user32.MonitorFromWindow.restype = wt.HMONITOR
 user32.OpenClipboard.argtypes = [wt.HWND]
+user32.OpenClipboard.restype = wt.BOOL
+user32.EmptyClipboard.restype = wt.BOOL
+user32.SetClipboardData.argtypes = [wt.UINT, wt.HANDLE]
+user32.SetClipboardData.restype = wt.HANDLE
 user32.GetClipboardData.argtypes = [wt.UINT]
 user32.GetClipboardData.restype = wt.HANDLE
 kernel32 = ctypes.windll.kernel32
+kernel32.GlobalAlloc.argtypes = [wt.UINT, ctypes.c_size_t]
+kernel32.GlobalAlloc.restype = wt.HGLOBAL
+kernel32.GlobalFree.argtypes = [wt.HGLOBAL]
+kernel32.GlobalFree.restype = wt.HGLOBAL
 kernel32.GlobalLock.argtypes = [wt.HGLOBAL]
 kernel32.GlobalLock.restype = ctypes.c_void_p
 kernel32.GlobalUnlock.argtypes = [wt.HGLOBAL]

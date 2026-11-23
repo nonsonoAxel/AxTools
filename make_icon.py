@@ -1,7 +1,7 @@
 """
 Dal logo (assets/logo.png, su fondo nero) genera:
   - ui/logo.png   logo con sfondo trasparente, per la barra dell'app
-  - axgrab.ico    icona dell'EXE: logo su riquadro scuro arrotondato
+  - axtools.ico   icona dell'EXE: logo su riquadro scuro arrotondato
 Uso: python make_icon.py
 """
 from PIL import Image, ImageDraw
@@ -44,6 +44,6 @@ if __name__ == "__main__":
     sizes = [16, 20, 24, 32, 40, 48, 64, 128, 256]
     # i formati piccoli vengono ridotti da un riquadro con meno margine, così il logo resta leggibile
     frames = [(tile(logo, pad=0.12) if s <= 32 else big).resize((s, s), Image.LANCZOS) for s in sizes]
-    frames[-1].save("axgrab.ico", sizes=[(s, s) for s in sizes], append_images=frames[:-1])
+    frames[-1].save("axtools.ico", sizes=[(s, s) for s in sizes], append_images=frames[:-1])
     big.save("assets/icona-1024.png")
-    print("creati: ui/logo.png, axgrab.ico, assets/icona-1024.png")
+    print("creati: ui/logo.png, axtools.ico, assets/icona-1024.png")

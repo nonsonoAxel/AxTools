@@ -1,17 +1,17 @@
 """
-Firma delle release di AxGrab (Ed25519).
+Firma delle release di AxTools (Ed25519).
 
 A cosa serve: l'app installa un aggiornamento solo se è firmato con la chiave privata di chi
-pubblica AxGrab. La chiave privata sta solo sul PC di chi crea le release; dentro l'app c'è solo
+pubblica AxTools. La chiave privata sta solo sul PC di chi crea le release; dentro l'app c'è solo
 la chiave pubblica, che permette di controllare la firma ma non di crearne una. Così chi riuscisse
 a entrare nell'account GitHub non potrebbe comunque far installare un EXE suo.
 
 Uso (dalla cartella del progetto):
   python firma.py nuova-chiave      crea la chiave privata (una volta sola) e mostra quella pubblica
   python firma.py chiave-pubblica   mostra di nuovo la chiave pubblica
-  python firma.py AxGrab.exe        crea AxGrab.exe.sig, da caricare nella release insieme all'EXE
+  python firma.py AxTools.exe       crea AxTools.exe.sig, da caricare nella release insieme all'EXE
 
-La chiave privata è in  %USERPROFILE%\\.axgrab-firma\\chiave-privata.txt  (fuori dal progetto:
+La chiave privata è in  %USERPROFILE%\\.axtools-firma\\chiave-privata.txt  (fuori dal progetto:
 non finisce su GitHub). Va tenuta segreta e va fatta una copia di riserva: se si perde, le
 versioni già installate non accettano più aggiornamenti automatici.
 
@@ -134,7 +134,7 @@ def verify(public: bytes, message: bytes, signature: bytes) -> bool:
 def _message(version: str, sha256: str, size: int) -> bytes:
     # la versione fa parte di ciò che viene firmato: un EXE vecchio (firmato a suo tempo) non può
     # essere ripubblicato come se fosse una versione nuova
-    return f"AxGrab release v1\n{version}\n{sha256}\n{size}\n".encode("utf-8")
+    return f"AxTools release v1\n{version}\n{sha256}\n{size}\n".encode("utf-8")
 
 
 def make_signature_file(secret: bytes, version: str, sha256: str, size: int) -> str:
@@ -162,14 +162,20 @@ def check_signature_file(text: str, public_hex: str, version: str):
 
 
 # ---------- strumento da riga di comando ----------
-KEY_FILE = Path(os.environ.get("AXGRAB_CHIAVE") or Path.home() / ".axgrab-firma" / "chiave-privata.txt")
+def _default_key_file() -> Path:
+    new = Path.home() / ".axtools-firma" / "chiave-privata.txt"
+    old = Path.home() / ".axgrab-firma" / "chiave-privata.txt"
+    return old if (not new.is_file() and old.is_file()) else new
+
+
+KEY_FILE = Path(os.environ.get("AXTOOLS_CHIAVE") or os.environ.get("AXGRAB_CHIAVE") or _default_key_file())
 
 
 def _load_secret() -> bytes:
     if not KEY_FILE.is_file():
         sys.exit(f"Chiave privata non trovata ({KEY_FILE}).\n"
                  "Metti la tua chiave-privata.txt sul Desktop e rilancia crea-exe.bat.\n"
-                 "NON crearne una nuova: le copie di AxGrab già installate rifiuterebbero gli aggiornamenti.")
+                 "NON crearne una nuova: le copie di AxTools già installate rifiuterebbero gli aggiornamenti.")
     try:
         secret = bytes.fromhex(KEY_FILE.read_text(encoding="ascii").strip())
     except ValueError:
