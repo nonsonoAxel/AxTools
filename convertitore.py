@@ -179,8 +179,12 @@ def convert_image(src: Path, dst: Path, fmt: str, quality: int = 85, max_side: i
         elif fmt == "ico":
             if im.mode != "RGBA":
                 im = im.convert("RGBA")
-            max_dim = max(im.size)
-            sizes = [(s, s) for s in (16, 24, 32, 48, 64, 128, 256) if s <= max_dim] or [(32, 32)]
+            min_dim = min(im.size)
+            sizes = [(s, s) for s in (16, 24, 32, 48, 64, 128, 256) if s <= min_dim]
+            if not sizes:
+                resampling = getattr(Image, "Resampling", Image).LANCZOS
+                im = im.resize((32, 32), resampling)
+                sizes = [(32, 32)]
             im.save(dst, format="ICO", sizes=sizes)
 
 
