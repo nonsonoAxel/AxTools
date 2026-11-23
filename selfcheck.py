@@ -150,9 +150,9 @@ assert plain[0]["start"] == 84.0 and plain[0]["speaker"] == "Mario" and plain[0]
 
 # --- ritaglio temporale, nuove impostazioni, lettore e code separate ---
 assert app.parse_timecode("1:30") == 90.0 and app.parse_timecode("1:02:03") == 3723.0
-c_prec = app.build_clip_args("0:10", "0:40", fast=False)
+c_prec = app.build_clip_args("0:10", "0:40", fast_cut=False)
 assert "--download-sections" in c_prec and "--force-keyframes-at-cuts" in c_prec
-c_fast = app.build_clip_args("0:10", "0:40", fast=True)
+c_fast = app.build_clip_args("0:10", "0:40", fast_cut=True)
 assert "--download-sections" in c_fast and "--force-keyframes-at-cuts" not in c_fast
 cs = app.clean_settings({"whisper_timestamps": True, "whisper_speakers": 4, "convert_dest": "downloads"})
 assert cs["whisper_timestamps"] is True and cs["whisper_speakers"] == 4 and cs["convert_dest"] == "downloads"
