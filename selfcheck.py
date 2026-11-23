@@ -112,6 +112,47 @@ assert "-b:v" in cmd_c10
 cmd_gif = convertitore.build_ffmpeg_cmd("ffmpeg", Path("a.mp4"), Path("b.gif"), "video", "gif", {}, duration=5.0)
 assert "palettegen" in " ".join(cmd_gif)
 
+nv_info = {"vendor": "nvenc", "label": "NVIDIA NVENC", "h264": "h264_nvenc", "webm": "av1_nvenc"}
+amf_info = {"vendor": "amf", "label": "AMD AMF", "h264": "h264_amf", "webm": "av1_amf"}
+qsv_info = {"vendor": "qsv", "label": "Intel QSV", "h264": "h264_qsv", "webm": "vp9_qsv"}
+assert convertitore.gpu_encoder_for("mp4", nv_info) == "h264_nvenc"
+assert convertitore.gpu_encoder_for("mkv", nv_info) == "h264_nvenc"
+assert convertitore.gpu_encoder_for("webm", nv_info) == "av1_nvenc"
+assert convertitore.gpu_encoder_for("mp3", nv_info) is None
+assert convertitore.gpu_encoder_for("gif", nv_info) is None
+assert convertitore.gpu_encoder_for("mp4", amf_info) == "h264_amf"
+assert convertitore.gpu_encoder_for("webm", qsv_info) == "vp9_qsv"
+assert convertitore.gpu_encoder_for("mp4", {}) is None
+
+for pre in ("high", "balanced", "compact10"):
+    cmd_nv = convertitore.build_ffmpeg_cmd("ffmpeg", Path("in.mkv"), Path("out.mp4"), "video", "mp4",
+                                           {"video_preset": pre}, duration=60.0,
+                                           gpu_enc="h264_nvenc", hwaccel=True)
+    assert cmd_nv.index("-hwaccel") < cmd_nv.index("-i") and "h264_nvenc" in cmd_nv
+    assert "scale=trunc(iw/2)*2:trunc(ih/2)*2" in cmd_nv and "yuv420p" in cmd_nv and "+faststart" in cmd_nv
+    assert ("-b:v" if pre == "compact10" else "-cq") in cmd_nv
+
+cmd_av1 = convertitore.build_ffmpeg_cmd("ffmpeg", Path("in.mp4"), Path("out.webm"), "video", "webm",
+                                        {"video_preset": "high"}, duration=30.0,
+                                        gpu_enc="av1_nvenc", hwaccel=True)
+assert "av1_nvenc" in cmd_av1 and "libopus" in cmd_av1 and "+faststart" not in cmd_av1
+cmd_amf = convertitore.build_ffmpeg_cmd("ffmpeg", Path("in.mp4"), Path("out.mp4"), "video", "mp4",
+                                        {"video_preset": "balanced"}, duration=30.0,
+                                        gpu_enc="h264_amf", hwaccel=True)
+assert "h264_amf" in cmd_amf and "-qp_i" in cmd_amf
+cmd_qsv = convertitore.build_ffmpeg_cmd("ffmpeg", Path("in.mp4"), Path("out.mp4"), "video", "mp4",
+                                        {"video_preset": "balanced"}, duration=30.0,
+                                        gpu_enc="h264_qsv", hwaccel=True)
+assert "h264_qsv" in cmd_qsv and "nv12" in cmd_qsv
+cmd_cpu_fb = convertitore.build_ffmpeg_cmd("ffmpeg", Path("in.mp4"), Path("out.mp4"), "video", "mp4",
+                                           {"video_preset": "balanced"}, duration=30.0,
+                                           gpu_enc=None, hwaccel=False)
+assert "libx264" in cmd_cpu_fb and "-hwaccel" not in cmd_cpu_fb
+cmd_aud = convertitore.build_ffmpeg_cmd("ffmpeg", Path("in.mp4"), Path("out.mp3"), "video", "mp3",
+                                        {"audio_kbps": 192}, duration=30.0,
+                                        gpu_enc=None, hwaccel=True)
+assert "-hwaccel" not in cmd_aud and "libmp3lame" in cmd_aud
+
 tmp_sc = Path(tempfile.mkdtemp(prefix="axtools_sc2_"))
 try:
     s_png = tmp_sc / "foto.png"
@@ -154,8 +195,27 @@ c_prec = app.build_clip_args("0:10", "0:40", fast_cut=False)
 assert "--download-sections" in c_prec and "--force-keyframes-at-cuts" in c_prec
 c_fast = app.build_clip_args("0:10", "0:40", fast_cut=True)
 assert "--download-sections" in c_fast and "--force-keyframes-at-cuts" not in c_fast
-cs = app.clean_settings({"whisper_timestamps": True, "whisper_speakers": 4, "convert_dest": "downloads"})
+cs = app.clean_settings({"whisper_timestamps": True, "whisper_speakers": 4, "convert_dest": "downloads",
+                          "convert_gpu": False, "whisper_diarize_gpu": True})
 assert cs["whisper_timestamps"] is True and cs["whisper_speakers"] == 4 and cs["convert_dest"] == "downloads"
+assert cs["convert_gpu"] is False and cs["whisper_diarize_gpu"] is True
+cs_bad = app.clean_settings({"convert_gpu": "yes", "whisper_diarize_gpu": 1})
+assert "convert_gpu" not in cs_bad and "whisper_diarize_gpu" not in cs_bad
+
+assert trascrizione.parse_driver_major("581.29") == 581
+assert trascrizione.parse_driver_major("") == 0
+assert trascrizione.DIAR_GPU_FAIL_RE.search("Failed to enable CUDA: no device. Fallback to cpu")
+assert not trascrizione.DIAR_GPU_FAIL_RE.search("progress 42.5%")
+for pkg in trascrizione.DIAR_GPU_PACKAGES:
+    assert pkg["url"].startswith("https://")
+    assert len(pkg["sha"]) == 64 and all(c in "0123456789abcdef" for c in pkg["sha"])
+    assert pkg["size"] > 0 and len(pkg["files"]) > 0
+cmd_d_cpu = trascrizione.build_diar_cmd("diar.exe", "seg.onnx", "emb.onnx", "a.wav", use_gpu=False, threads=6)
+assert "--segmentation.provider=cpu" in cmd_d_cpu and "--embedding.provider=cpu" in cmd_d_cpu
+assert "--segmentation.num-threads=6" in cmd_d_cpu and "--clustering.num-clusters=" not in " ".join(cmd_d_cpu)
+cmd_d_gpu = trascrizione.build_diar_cmd("diar.exe", "seg.onnx", "emb.onnx", "a.wav", num_speakers=3, use_gpu=True)
+assert "--segmentation.provider=cuda" in cmd_d_gpu and "--embedding.provider=cuda" in cmd_d_gpu
+assert "--clustering.num-clusters=3" in cmd_d_gpu and cmd_d_gpu[-1] == "a.wav"
 
 dl_dir = Path(api.settings["folder"])
 dl_dir.mkdir(parents=True, exist_ok=True)
@@ -180,6 +240,40 @@ dl_job = api._new_job(title="y.mp4", kind="download", status="done")
 api.clear_finished("convert")
 assert cv_job["id"] not in api._jobs and dl_job["id"] in api._jobs
 api.clear_finished("download")
+
+tmp_dnd = Path(tempfile.mkdtemp(prefix="axtools_dnd_"))
+try:
+    f_mp4 = tmp_dnd / "clip.mp4"
+    f_png = tmp_dnd / "foto.png"
+    f_txt = tmp_dnd / "note.txt"
+    f_dir = tmp_dnd / "sub"
+    f_dir.mkdir()
+    for p in (f_mp4, f_png, f_txt):
+        p.write_bytes(b"x")
+    drop_ev = {"dataTransfer": {"files": [
+        {"pywebviewFullPath": str(f_mp4)},
+        {"pywebviewFullPath": str(f_png)},
+        {"pywebviewFullPath": str(f_txt)},
+        {"pywebviewFullPath": str(f_dir)},
+    ]}}
+    events.clear()
+    assert api.set_view("convert") == "convert"
+    api._on_dom_drop(drop_ev)
+    assert events[-1][0] == "dropped_files" and events[-1][1]["target"] == "convert"
+    assert len(events[-1][1]["files"]) == 2 and events[-1][1]["skipped"] == 2
+    assert str(f_mp4) in api._picked_files and str(f_png) in api._picked_files
+
+    assert api.set_view("transcribe") == "transcribe"
+    assert api.set_view("invalid") == "transcribe"
+    api._on_dom_drop(drop_ev)
+    assert events[-1][0] == "dropped_files" and events[-1][1]["target"] == "transcribe"
+    assert len(events[-1][1]["files"]) == 1 and events[-1][1]["skipped"] == 3
+
+    n_ev = len(events)
+    api._on_dom_drop({"dataTransfer": {"files": []}})
+    assert len(events) == n_ev
+finally:
+    shutil.rmtree(tmp_dnd, ignore_errors=True)
 
 assert app.APP_NAME == "AxTools"
 assert app.GITHUB_REPO == "nonsonoAxel/AxTools"

@@ -33,7 +33,7 @@ import firma
 import trascrizione
 
 APP_NAME = "AxTools"
-APP_VERSION = "1.3.0"           # da aumentare a ogni nuova release su GitHub (es. 1.0.1, 1.1.0)
+APP_VERSION = "1.4.0"           # da aumentare a ogni nuova release su GitHub (es. 1.0.1, 1.1.0)
 GITHUB_REPO = "nonsonoAxel/AxTools"
 RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
@@ -86,6 +86,8 @@ DIAR_DIR = BIN_DIR / "diarizzazione"
 DIAR_EXE = DIAR_DIR / "sherpa-onnx-offline-speaker-diarization.exe"
 DIAR_SEG_MODEL = DIAR_DIR / "pyannote-segmentation.onnx"
 DIAR_EMB_MODEL = DIAR_DIR / "wespeaker-embedding.onnx"
+DIAR_GPU_DIR = BIN_DIR / "diarizzazione-cuda"
+DIAR_GPU_EXE = DIAR_GPU_DIR / "sherpa-onnx-offline-speaker-diarization.exe"
 
 # copia dei cookie dei soli siti video: evita di rileggere (e decifrare) il browser a ogni
 # analisi e permette di usarli anche quando un browser Chromium è aperto e blocca il suo file.
@@ -144,8 +146,10 @@ DEFAULT_SETTINGS = {
     "whisper_gpu": False,     # trascrizione sulla scheda NVIDIA (se il motore CUDA è scaricato)
     "whisper_timestamps": False,
     "whisper_diarize": False,
+    "whisper_diarize_gpu": False,
     "whisper_speakers": 0,    # 0 = automatico | 2..6
     "convert_dest": "same",   # same (accanto al file) | downloads (cartella download)
+    "convert_gpu": True,      # conversione video con GPU se supportata (fallback CPU automatico)
 }
 # valori ammessi: tutto il resto (da settings.json o dall'interfaccia) viene scartato
 ALLOWED_SETTINGS = {
@@ -196,7 +200,8 @@ def clean_settings(data) -> dict:
             v = int(v)
         if type(v) in (str, int) and v in allowed:
             out[key] = v
-    for key in ("playlist", "whisper_gpu", "whisper_timestamps", "whisper_diarize"):
+    for key in ("playlist", "whisper_gpu", "whisper_timestamps", "whisper_diarize",
+                "whisper_diarize_gpu", "convert_gpu"):
         if isinstance(data.get(key), bool):
             out[key] = data[key]
     folder = data.get("folder")
@@ -422,6 +427,9 @@ class Api:
         unlink_quiet(*CACHE_DIR.glob("*.json"), *CACHE_DIR.glob("ck-*.txt"), COOKIE_FILE_OLD)
         self._info_cache = {}
         self._sysinfo = None
+        self._conv_gpu = None
+        self._active_view = "download"
+        self._dnd_bound = False
         self._cookie_reads = set()      # file temporanei in cui yt-dlp sta leggendo dal browser
         self._scan = []                 # modelli Whisper trovati sul PC dall'ultima ricerca
         self._last_code = None          # codice d'uscita dell'ultimo whisper-cli, per il log
@@ -508,7 +516,14 @@ class Api:
         log.warning("impronta di %s non trovata in %s", filename, sums_url)
         return None
 
-    def _download_file(self, url, dest: Path, label, event="setup"):
+    @staticmethod
+    def _safe_rel_path(label: str, name: str, rel: str) -> PureWindowsPath:
+        relp = PureWindowsPath(rel)
+        if relp.is_absolute() or relp.drive or relp.root or ".." in relp.parts or not relp.parts:
+            raise ValueError(f"{label}: percorso non valido nell'archivio ({name})")
+        return relp
+
+    def _download_file(self, url, dest: Path, label, event="setup", progress_offset=0, progress_total=None):
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=60) as r:
             total = int(r.headers.get("Content-Length") or 0)
@@ -521,7 +536,8 @@ class Api:
                         break
                     f.write(chunk)
                     done += len(chunk)
-                    self._emit(event, {"label": label, "done": done, "total": total})
+                    self._emit(event, {"label": label, "done": progress_offset + done,
+                                       "total": progress_total or total})
             tmp.replace(dest)
 
     # ---------- dipendenze ----------
@@ -552,9 +568,7 @@ class Api:
                 if rel:
                     # il percorso nello zip non può uscire dalla cartella: niente "..", niente percorsi
                     # assoluti o con lettera di unità (es. "_internal/../../altro", "C:/Windows/...")
-                    relp = PureWindowsPath(rel)
-                    if relp.is_absolute() or relp.drive or relp.root or ".." in relp.parts or not relp.parts:
-                        raise ValueError(f"{label}: percorso non valido nello zip ({m.filename})")
+                    relp = self._safe_rel_path(label, m.filename, rel)
                     out = tmp / relp
                     out.parent.mkdir(parents=True, exist_ok=True)
                     with z.open(m) as src, open(out, "wb") as dst:
@@ -592,6 +606,7 @@ class Api:
                 self._install_zip(YTDLP_URL, "yt-dlp", YTDLP_DIR, self._keep_ytdlp, YTDLP_SUMS)
             if not OWN_EXE["ffmpeg"].exists():
                 self._install_zip(FFMPEG_URL, "ffmpeg", FFMPEG_DIR, self._keep_ffmpeg, FFMPEG_SUMS)
+                self._conv_gpu = None
             if not OWN_EXE["deno"].exists():
                 self._install_zip(DENO_URL, "Deno", BIN_DIR / "deno-dir",
                                   lambda n: "deno.exe" if n.replace("\\", "/").split("/")[-1] == "deno.exe" else None,
@@ -1156,24 +1171,23 @@ class Api:
             self._finish_job(job, ok, err)
 
     # ---------- conversione locale (Converti) ----------
-    def pick_convert_files(self):
-        res = self._window.create_file_dialog(
-            webview.OPEN_DIALOG, allow_multiple=True,
-            file_types=(
-                "File multimediali (*.mp4;*.mkv;*.webm;*.mov;*.avi;*.flv;*.ts;*.m4v;*.3gp;*.wmv;"
-                "*.mp3;*.m4a;*.wav;*.flac;*.ogg;*.oga;*.opus;*.aac;*.wma;*.aiff;"
-                "*.png;*.jpg;*.jpeg;*.webp;*.ico;*.bmp;*.tif;*.tiff)",
-            ),
-        )
-        if not res:
-            return []
-        paths = list(res) if isinstance(res, (list, tuple)) else [res]
+    def set_view(self, name):
+        """Tiene traccia della scheda attiva per instradare i file trascinati nella finestra."""
+        if name in ("download", "convert", "transcribe", "history", "settings"):
+            self._active_view = name
+        return self._active_view
+
+    def _collect_convert_files(self, paths):
         ffprobe = str(FFPROBE_EXE) if FFPROBE_EXE.exists() else None
-        out = []
+        out, skipped = [], 0
         for raw in paths:
+            if not isinstance(raw, str) or not raw:
+                skipped += 1
+                continue
             p = Path(raw)
             kind = convertitore.detect_kind(p)
             if not kind or not p.is_file():
+                skipped += 1
                 continue
             self._picked_files.add(str(p))
             meta = convertitore.probe_media(ffprobe, p)
@@ -1186,7 +1200,48 @@ class Api:
                 "kind": kind, "ext": p.suffix.lstrip(".").lower(),
                 "size": size, "duration": meta["duration"], "dims": meta["dims"],
             })
-        return out
+        return out, skipped
+
+    def pick_convert_files(self):
+        res = self._window.create_file_dialog(
+            webview.OPEN_DIALOG, allow_multiple=True,
+            file_types=(
+                "File multimediali (*.mp4;*.mkv;*.webm;*.mov;*.avi;*.flv;*.ts;*.m4v;*.3gp;*.wmv;"
+                "*.mp3;*.m4a;*.wav;*.flac;*.ogg;*.oga;*.opus;*.aac;*.wma;*.aiff;"
+                "*.png;*.jpg;*.jpeg;*.webp;*.ico;*.bmp;*.tif;*.tiff)",
+            ),
+        )
+        if not res:
+            return []
+        paths = list(res) if isinstance(res, (list, tuple)) else [res]
+        items, _ = self._collect_convert_files(paths)
+        return items
+
+    def _conv_gpu_info(self):
+        """Rileva una volta l'encoder GPU disponibile per ffmpeg (NVENC/AMF/QSV)."""
+        if self._conv_gpu is not None:
+            return self._conv_gpu
+        ff = self._exe("ffmpeg")
+        if not ff:
+            return {"vendor": None, "label": "", "h264": None, "webm": None}
+        info = convertitore.probe_gpu_encoders(ff, nvidia_hint=self._system()["nvidia"])
+        self._conv_gpu = info
+        log.info("encoder GPU conversione: %s", info)
+        return info
+
+    def convert_info(self):
+        """Stato accelerazione GPU per la scheda Converti e le Impostazioni."""
+        g = self._conv_gpu_info()
+        sysinfo = self._system()
+        return {
+            "gpu_available": bool(g.get("h264")),
+            "gpu_on": bool(self.settings.get("convert_gpu", True)) and bool(g.get("h264")),
+            "vendor": g.get("vendor"),
+            "label": g.get("label") or "",
+            "h264": g.get("h264"),
+            "webm": g.get("webm"),
+            "gpu_name": sysinfo.get("gpu_name") or "",
+        }
 
     def start_convert(self, items, options=None):
         if not isinstance(items, list):
@@ -1194,6 +1249,7 @@ class Api:
         opts = options if isinstance(options, dict) else {}
         fmt = str(opts.get("fmt") or "").lower().lstrip(".")
         dest_mode = "downloads" if opts.get("dest_mode") == "downloads" else "same"
+        use_gpu = opts.get("use_gpu") if isinstance(opts.get("use_gpu"), bool) else bool(self.settings.get("convert_gpu", True))
         clean_opts = {
             "fmt": fmt,
             "video_preset": str(opts.get("video_preset") or "balanced"),
@@ -1201,6 +1257,7 @@ class Api:
             "image_quality": int(opts.get("image_quality") or 85) if str(opts.get("image_quality") or "").isdigit() else 85,
             "image_max_side": int(opts.get("image_max_side") or 0) if str(opts.get("image_max_side") or "").isdigit() else 0,
             "dest_mode": dest_mode,
+            "use_gpu": use_gpu,
         }
         ids = []
         for entry in items:
@@ -1224,6 +1281,39 @@ class Api:
         )
         threading.Thread(target=self._run_convert, args=(job, src, opts), daemon=True).start()
         return job["id"]
+
+    def _run_ffmpeg_convert(self, job, cmd: list[str], dst: Path, dur):
+        """Esegue un singolo tentativo di conversione ffmpeg aggiornando avanzamento e ETA."""
+        job.update(status="converting", percent=0, speed=None, eta=None)
+        self._emit("job", self._public(job))
+        t0, last_emit, tail = time.time(), 0.0, []
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, encoding="utf-8", errors="replace",
+                                creationflags=NO_WINDOW, bufsize=1)
+        job["proc"] = proc
+        for line in proc.stdout:
+            line = line.rstrip()
+            t_sec = convertitore.parse_ffmpeg_time_us(line)
+            if t_sec is not None and dur and dur > 0:
+                pct = min(99.0, max(0.0, t_sec / dur * 100.0))
+                job["percent"] = pct
+                elapsed = time.time() - t0
+                if pct > 1.5 and elapsed > 0.2:
+                    job["eta"] = elapsed * (100.0 - pct) / pct
+                now = time.time()
+                if now - last_emit > 0.25:
+                    last_emit = now
+                    self._emit("job", self._public(job))
+            elif line and "=" not in line:
+                tail = (tail + [line])[-5:]
+        proc.wait()
+        if job["cancel"]:
+            unlink_quiet(dst)
+            return False, "Annullato"
+        if proc.returncode == 0 and dst.is_file():
+            return True, ""
+        unlink_quiet(dst)
+        return False, (" | ".join(tail)[-200:] or f"Errore ffmpeg (codice {proc.returncode})")
 
     def _run_convert(self, job, src: Path, opts: dict):
         with self._slots:
@@ -1254,39 +1344,32 @@ class Api:
                     if not dur:
                         ffp = str(FFPROBE_EXE) if FFPROBE_EXE.exists() else None
                         dur = convertitore.probe_media(ffp, src).get("duration")
-                    cmd = convertitore.build_ffmpeg_cmd(ff, src, dst, kind, opts["fmt"], opts, dur)
-                    job.update(status="converting", percent=0, speed=None, eta=None)
-                    self._emit("job", self._public(job))
-                    t0, last_emit, tail = time.time(), 0.0, []
-                    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                            text=True, encoding="utf-8", errors="replace",
-                                            creationflags=NO_WINDOW, bufsize=1)
-                    job["proc"] = proc
-                    for line in proc.stdout:
-                        line = line.rstrip()
-                        t_sec = convertitore.parse_ffmpeg_time_us(line)
-                        if t_sec is not None and dur and dur > 0:
-                            pct = min(99.0, max(0.0, t_sec / dur * 100.0))
-                            job["percent"] = pct
-                            elapsed = time.time() - t0
-                            if pct > 1.5 and elapsed > 0.2:
-                                job["eta"] = elapsed * (100.0 - pct) / pct
-                            now = time.time()
-                            if now - last_emit > 0.25:
-                                last_emit = now
-                                self._emit("job", self._public(job))
-                        elif line and "=" not in line:
-                            tail = (tail + [line])[-5:]
-                    proc.wait()
-                    if job["cancel"]:
-                        unlink_quiet(dst)
-                        ok, err = False, "Annullato"
-                    elif proc.returncode == 0 and dst.is_file():
-                        job["file"] = str(dst)
-                        ok, err = True, ""
-                    else:
-                        unlink_quiet(dst)
-                        ok, err = False, (" | ".join(tail)[-200:] or f"Errore ffmpeg (codice {proc.returncode})")
+                    want_gpu = bool(opts.get("use_gpu", self.settings.get("convert_gpu", True)))
+                    ginfo = self._conv_gpu_info() if want_gpu else {}
+                    gpu_enc = convertitore.gpu_encoder_for(opts["fmt"], ginfo) if want_gpu else None
+                    hwaccel = bool(want_gpu and ginfo.get("vendor") and kind == "video"
+                                   and opts["fmt"] not in convertitore.AUDIO_OUT)
+                    attempts = ([(gpu_enc, hwaccel)] if (gpu_enc or hwaccel) else []) + [(None, False)]
+                    ok, err = False, ""
+                    for i, (enc, hw) in enumerate(attempts):
+                        cmd = convertitore.build_ffmpeg_cmd(ff, src, dst, kind, opts["fmt"], opts, dur,
+                                                            gpu_enc=enc, hwaccel=hw)
+                        job["hw"] = "GPU" if (enc or hw) else ""
+                        t_start = time.time()
+                        ok, err = self._run_ffmpeg_convert(job, cmd, dst, dur)
+                        if job["cancel"]:
+                            break
+                        if ok:
+                            job["file"] = str(dst)
+                            log.info("conversione %s -> %s completata in %.1fs (%s)", src.suffix, opts["fmt"],
+                                     time.time() - t_start, enc or ("hwdec" if hw else "cpu"))
+                            break
+                        if i + 1 < len(attempts):
+                            log.warning("conversione GPU (%s) fallita, riprovo su CPU: %s", enc or "hwdec", err)
+                            unlink_quiet(dst)
+                            job["hw"] = ""
+                            job["warning"] = "Accelerazione GPU non riuscita per questo file: riprovo sul processore."
+                            self._emit("job", self._public(job))
             except Exception as e:
                 if dst:
                     unlink_quiet(dst)
@@ -1342,10 +1425,17 @@ class Api:
             txt = out_base.with_suffix(".txt")
             for i, (kind, exe) in enumerate(engines):
                 unlink_quiet(*outputs)
+                job["hw"] = "GPU" if kind == "gpu" else ""
                 ok, used_gpu, tail, secs = self._run_whisper(job, exe, model, wav, work, kind == "gpu")
                 if job["cancel"]:
                     return False, "Annullato"
                 if ok:
+                    whisper_gpu_used = (kind == "gpu" and used_gpu)
+                    job["hw"] = "GPU" if whisper_gpu_used else ""
+                    if kind == "gpu" and not used_gpu:
+                        # testo pronto, ma la scheda non è stata usata (es. driver vecchio): niente da rifare
+                        job["warning"] = ("La scheda NVIDIA non è stata usata: la trascrizione è andata sul "
+                                          "processore. Aggiornare il driver NVIDIA di solito risolve.")
                     srt_work, txt_work = work.with_suffix(".srt"), work.with_suffix(".txt")
                     segments = trascrizione.parse_srt(srt_work.read_text(encoding="utf-8", errors="replace")) if srt_work.is_file() else []
                     if not segments and txt_work.is_file():
@@ -1363,6 +1453,8 @@ class Api:
                                 job["warning"] = "Separazione interlocutori non riuscita: trascrizione salvata senza nomi."
                         else:
                             job["warning"] = "Motore interlocutori non installato: trascrizione salvata senza nomi."
+                        if whisper_gpu_used and not job.get("hw"):
+                            job["hw"] = "GPU"
 
                     if segments:
                         txt.write_text(trascrizione.format_txt(segments, timestamps=timestamps, speakers=True), encoding="utf-8")
@@ -1372,10 +1464,6 @@ class Api:
                             if work.with_suffix(ext).is_file():
                                 shutil.move(str(work.with_suffix(ext)), str(out_base.with_suffix(ext)))
 
-                    if kind == "gpu" and not used_gpu:
-                        # testo pronto, ma la scheda non è stata usata (es. driver vecchio): niente da rifare
-                        job["warning"] = ("La scheda NVIDIA non è stata usata: la trascrizione è andata sul "
-                                          "processore. Aggiornare il driver NVIDIA di solito risolve.")
                     log.info("trascrizione: %.0fs di audio in %.1fs (%.3fx), modello %s, lingua %s, %s, diar=%s",
                              seconds, secs, secs / seconds, model.name, self.settings.get("whisper_lang"),
                              "GPU" if used_gpu else "processore", diarize)
@@ -1384,29 +1472,28 @@ class Api:
                 log.warning("trascrizione %s non riuscita (codice %s, testo scritto: %s): %s", kind,
                             self._last_code, work.with_suffix(".txt").is_file(), " | ".join(tail)[-300:])
                 if kind == "gpu" and i + 1 < len(engines):
+                    job["hw"] = ""
                     job["warning"] = ("La scheda NVIDIA non ha funzionato per questa trascrizione: "
                                       "la faccio con il processore.")
             return False, "La trascrizione non è riuscita. Riprova, o prova un modello diverso."
         finally:
             unlink_quiet(wav, *outputs)
 
-    def _run_diarization(self, job, wav: Path, num_speakers: int = 0):
-        """Esegue sherpa-onnx-offline-speaker-diarization.exe su WAV 16 kHz mono."""
-        args = [
-            str(DIAR_EXE),
-            f"--segmentation.pyannote-model={short_path(DIAR_SEG_MODEL)}",
-            f"--embedding.model={short_path(DIAR_EMB_MODEL)}",
-        ]
-        if num_speakers > 0:
-            args.append(f"--clustering.num-clusters={num_speakers}")
-        args.append(short_path(wav))
-        job.update(status="diarizing", percent=0, eta=None)
+    def _run_diar_once(self, job, exe: Path, work_dir: Path, wav: Path, num_speakers: int, use_gpu: bool):
+        """Esegue sherpa-onnx-offline-speaker-diarization.exe su GPU o CPU."""
+        threads = max(1, min((os.cpu_count() or 4) - 2, 8))
+        args = trascrizione.build_diar_cmd(
+            str(exe), short_path(DIAR_SEG_MODEL), short_path(DIAR_EMB_MODEL),
+            short_path(wav), num_speakers=num_speakers, use_gpu=use_gpu, threads=threads,
+        )
+        job.update(status="diarizing", percent=0, eta=None, hw="GPU" if use_gpu else "")
         self._emit("job", self._public(job))
-        t0, last_emit, turns = time.time(), 0.0, []
+        t0, last_emit, turns, tail, saw_gpu_fail = time.time(), 0.0, [], [], False
+        env = {**os.environ, "PATH": str(work_dir) + os.pathsep + os.environ.get("PATH", "")} if use_gpu else None
         try:
             proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                     encoding="utf-8", errors="replace", creationflags=NO_WINDOW,
-                                    cwd=str(DIAR_DIR), bufsize=1)
+                                    cwd=str(work_dir), env=env, bufsize=1)
             job["proc"] = proc
             for line in proc.stdout:
                 pm = trascrizione.DIAR_PROGRESS_RE.search(line)
@@ -1421,17 +1508,50 @@ class Api:
                     lm = trascrizione.DIAR_LINE_RE.match(line)
                     if lm:
                         turns.append((float(lm.group(1)), float(lm.group(2)), int(lm.group(3))))
+                    else:
+                        if use_gpu and trascrizione.DIAR_GPU_FAIL_RE.search(line):
+                            saw_gpu_fail = True
+                        if line.strip():
+                            tail = (tail + [line.strip()])[-5:]
             proc.wait()
-            return proc.returncode == 0, turns
+            return proc.returncode == 0, (use_gpu and not saw_gpu_fail), turns, tail, time.time() - t0
         except Exception as e:
-            log.warning("diarizzazione non riuscita: %s", e)
-            return False, []
+            return False, False, [], [str(e)], time.time() - t0
+
+    def _run_diarization(self, job, wav: Path, num_speakers: int = 0):
+        """Esegue la diarizzazione su GPU NVIDIA se pronta, altrimenti su CPU (con fallback automatico)."""
+        engines = ([("gpu", DIAR_GPU_EXE, DIAR_GPU_DIR)] if self._diar_gpu_ready() else []) + [
+            ("cpu", DIAR_EXE, DIAR_DIR)
+        ]
+        for i, (kind, exe, work_dir) in enumerate(engines):
+            ok, used_gpu, turns, tail, secs = self._run_diar_once(job, exe, work_dir, wav, num_speakers, kind == "gpu")
+            if job["cancel"]:
+                return False, []
+            if ok:
+                if kind == "gpu" and not used_gpu:
+                    job["hw"] = ""
+                    job["warning"] = ("La scheda NVIDIA non è stata usata per gli interlocutori "
+                                      f"(serve driver NVIDIA ≥ {trascrizione.DIAR_GPU_MIN_DRIVER}): elaborazione sul processore.")
+                log.info("diarizzazione: %d turni in %.1fs (%s)", len(turns), secs, "GPU" if used_gpu else "processore")
+                return True, turns
+            log.warning("diarizzazione %s non riuscita: %s", kind, " | ".join(tail)[-300:])
+            if kind == "gpu" and i + 1 < len(engines):
+                job["hw"] = ""
+                job["warning"] = "La scheda NVIDIA non ha funzionato per gli interlocutori: riprovo sul processore."
+        return False, []
 
     def _diar_installed(self):
         return all(p.is_file() for p in (DIAR_EXE, DIAR_SEG_MODEL, DIAR_EMB_MODEL))
 
     def _diar_ready(self):
         return bool(self.settings.get("whisper_diarize")) and self._diar_installed()
+
+    def _diar_gpu_installed(self):
+        return (DIAR_SEG_MODEL.is_file() and DIAR_EMB_MODEL.is_file()
+                and all((DIAR_GPU_DIR / f).is_file() for f in trascrizione.DIAR_GPU_REQUIRED_FILES))
+
+    def _diar_gpu_ready(self):
+        return bool(self.settings.get("whisper_diarize_gpu")) and self._diar_gpu_installed() and self._system()["nvidia"]
 
     def _run_whisper(self, job, exe, model, wav, out_base, gpu):
         """Una esecuzione di whisper-cli. Restituisce (ok, GPU usata davvero, ultime righe, secondi)."""
@@ -1469,6 +1589,24 @@ class Api:
     def _gpu_ready(self):
         return bool(self.settings.get("whisper_gpu")) and WHISPER_GPU_EXE.exists() and self._system()["nvidia"]
 
+    def _collect_transcribe_files(self, paths):
+        out, skipped = [], 0
+        for raw in paths:
+            if not isinstance(raw, str) or not raw:
+                skipped += 1
+                continue
+            p = Path(raw)
+            if not p.is_file() or convertitore.detect_kind(p) not in ("video", "audio"):
+                skipped += 1
+                continue
+            self._picked_files.add(str(p))
+            try:
+                size = p.stat().st_size
+            except OSError:
+                size = 0
+            out.append({"path": str(p), "name": p.name, "folder": str(p.parent), "size": size})
+        return out, skipped
+
     def pick_transcribe_files(self):
         res = self._window.create_file_dialog(
             webview.OPEN_DIALOG, allow_multiple=True,
@@ -1477,18 +1615,8 @@ class Api:
         if not res:
             return []
         paths = list(res) if isinstance(res, (list, tuple)) else [res]
-        out = []
-        for raw in paths:
-            p = Path(raw)
-            if not p.is_file():
-                continue
-            self._picked_files.add(str(p))
-            try:
-                size = p.stat().st_size
-            except OSError:
-                size = 0
-            out.append({"path": str(p), "name": p.name, "folder": str(p.parent), "size": size})
-        return out
+        items, _ = self._collect_transcribe_files(paths)
+        return items
 
     def transcribe_files(self, paths, overrides=None):
         if not self._whisper_model_path():
@@ -1609,15 +1737,20 @@ class Api:
         m.dwLength = ctypes.sizeof(MEM)
         ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m))
         smi = os.path.join(_WINDIR, "System32", "nvidia-smi.exe")      # c'è solo con il driver NVIDIA
-        nvidia, gpu_name = os.path.exists(smi), ""
+        nvidia, gpu_name, driver_version = os.path.exists(smi), "", ""
         if nvidia:
             try:
-                gpu_name = subprocess.run([smi, "--query-gpu=name", "--format=csv,noheader"], capture_output=True,
-                                          text=True, creationflags=NO_WINDOW, timeout=8).stdout.strip().splitlines()[0][:60]
+                out = subprocess.run([smi, "--query-gpu=name,driver_version", "--format=csv,noheader"],
+                                     capture_output=True, text=True, creationflags=NO_WINDOW, timeout=8).stdout.strip()
+                first = next((l for l in out.splitlines() if l.strip()), "")
+                parts = [p.strip() for p in first.split(",", 1)]
+                gpu_name = (parts[0][:60] if parts and parts[0] else "scheda NVIDIA")
+                driver_version = parts[1][:30] if len(parts) > 1 else ""
             except Exception:
                 gpu_name = "scheda NVIDIA"
         return {"ram": round(m.ullTotalPhys / 2**30, 1), "cores": os.cpu_count() or 4, "nvidia": nvidia,
-                "gpu_name": gpu_name}
+                "gpu_name": gpu_name, "driver_version": driver_version,
+                "driver_major": trascrizione.parse_driver_major(driver_version)}
 
     def whisper_info(self):
         """Tutto quello che serve alla pagina Trascrizione: catalogo, cosa è scaricato, consigli."""
@@ -1640,6 +1773,10 @@ class Api:
                 "diar_installed": self._diar_installed(), "diar_on": self._diar_ready(),
                 "diar_disk": dir_size(DIAR_DIR) if DIAR_DIR.is_dir() else 0,
                 "diar_size": trascrizione.DIAR_TOTAL_SIZE,
+                "diar_gpu_installed": self._diar_gpu_installed(), "diar_gpu_on": self._diar_gpu_ready(),
+                "diar_gpu_disk": dir_size(DIAR_GPU_DIR) if DIAR_GPU_DIR.is_dir() else 0,
+                "diar_gpu_size": trascrizione.DIAR_GPU_TOTAL_SIZE,
+                "diar_gpu_min_driver": trascrizione.DIAR_GPU_MIN_DRIVER,
                 "timestamps": bool(self.settings.get("whisper_timestamps")),
                 "speakers": int(self.settings.get("whisper_speakers") or 0),
                 "recommended": trascrizione.recommend(sysinfo["ram"], sysinfo["cores"], sysinfo["nvidia"])}
@@ -1694,14 +1831,19 @@ class Api:
         shutil.rmtree(WHISPER_GPU_DIR, ignore_errors=True)
         return {"ok": True, **self.whisper_info()}
 
-    def _extract_tar_bz2(self, url, label, dest_dir: Path, keep, expected_sha, event="model"):
+    def _extract_tar_bz2(self, url, label, dest_dir: Path, keep, expected_sha, event="model",
+                         progress_offset=0, progress_total=None):
         """Scarica un archivio .tar.bz2, ne verifica l'impronta SHA-256 ed estrae i file richiesti."""
-        tpath = BIN_DIR / f"{label.replace(' ', '_')}.tar.bz2"
+        safe = re.sub(r"[^A-Za-z0-9._-]", "_", label)
+        tpath = BIN_DIR / f"{safe}.tar.bz2"
         try:
-            self._download_file(url, tpath, label, event=event)
+            self._download_file(url, tpath, label, event=event,
+                                progress_offset=progress_offset, progress_total=progress_total)
             if trascrizione.sha256_file(tpath) != expected_sha.lower():
                 raise ValueError(f"{label}: il file scaricato è rovinato o non corrisponde all'impronta.")
-            self._emit(event, {"label": f"Estrazione {label}", "done": 1, "total": 1})
+            done_base = progress_offset + (tpath.stat().st_size if tpath.exists() else 0)
+            self._emit(event, {"label": f"Estrazione {label}", "done": done_base,
+                               "total": progress_total or done_base or 1})
             with tarfile.open(tpath, "r:bz2") as tf:
                 for m in tf.getmembers():
                     if not m.isfile():
@@ -1709,9 +1851,7 @@ class Api:
                     rel = keep(m.name)
                     if not rel:
                         continue
-                    relp = PureWindowsPath(rel)
-                    if relp.is_absolute() or relp.drive or relp.root or ".." in relp.parts or not relp.parts:
-                        raise ValueError(f"{label}: percorso non valido nell'archivio ({m.name})")
+                    relp = self._safe_rel_path(label, m.name, rel)
                     out = dest_dir / relp
                     out.parent.mkdir(parents=True, exist_ok=True)
                     with tf.extractfile(m) as src, open(out, "wb") as dst:
@@ -1719,24 +1859,59 @@ class Api:
         finally:
             unlink_quiet(tpath)
 
+    def _extract_zip_into(self, url, label, dest_dir: Path, keep, expected_sha, event="model",
+                          progress_offset=0, progress_total=None):
+        """Scarica un archivio zip/whl/nupkg, ne verifica l'impronta SHA-256 ed estrae in dest_dir."""
+        safe = re.sub(r"[^A-Za-z0-9._-]", "_", label)
+        zpath = BIN_DIR / f"{safe}.zip"
+        try:
+            self._download_file(url, zpath, label, event=event,
+                                progress_offset=progress_offset, progress_total=progress_total)
+            if trascrizione.sha256_file(zpath) != expected_sha.lower():
+                raise ValueError(f"{label}: il file scaricato è rovinato o non corrisponde all'impronta.")
+            done_base = progress_offset + (zpath.stat().st_size if zpath.exists() else 0)
+            self._emit(event, {"label": f"Estrazione {label}", "done": done_base,
+                               "total": progress_total or done_base or 1})
+            with zipfile.ZipFile(zpath) as zf:
+                for m in zf.infolist():
+                    if m.is_dir():
+                        continue
+                    rel = keep(m.filename)
+                    if not rel:
+                        continue
+                    relp = self._safe_rel_path(label, m.filename, rel)
+                    out = dest_dir / relp
+                    out.parent.mkdir(parents=True, exist_ok=True)
+                    with zf.open(m) as src, open(out, "wb") as dst:
+                        shutil.copyfileobj(src, dst)
+        finally:
+            unlink_quiet(zpath)
+
     def _install_diarization(self):
         tmp = DIAR_DIR.with_name(DIAR_DIR.name + ".new")
         shutil.rmtree(tmp, ignore_errors=True)
         tmp.mkdir(parents=True, exist_ok=True)
+        total = trascrizione.DIAR_TOTAL_SIZE
+        offset = 0
         try:
             self._extract_tar_bz2(
                 trascrizione.DIAR_ENGINE_URL, "motore interlocutori", tmp,
                 lambda n: n.replace("\\", "/").split("/")[-1]
                 if n.replace("\\", "/").split("/")[-1] in trascrizione.DIAR_ENGINE_FILES else None,
                 trascrizione.DIAR_ENGINE_SHA, event="model",
+                progress_offset=offset, progress_total=total,
             )
+            offset += trascrizione.DIAR_ENGINE_SIZE
             self._extract_tar_bz2(
                 trascrizione.DIAR_SEG_URL, "modello segmentazione", tmp,
                 lambda n: "pyannote-segmentation.onnx" if n.replace("\\", "/").endswith("/model.onnx") else None,
                 trascrizione.DIAR_SEG_SHA, event="model",
+                progress_offset=offset, progress_total=total,
             )
+            offset += trascrizione.DIAR_SEG_SIZE
             emb_tmp = tmp / "wespeaker-embedding.onnx.part"
-            self._download_file(trascrizione.DIAR_EMB_URL, emb_tmp, "modello voci", event="model")
+            self._download_file(trascrizione.DIAR_EMB_URL, emb_tmp, "modello voci", event="model",
+                                progress_offset=offset, progress_total=total)
             if trascrizione.sha256_file(emb_tmp) != trascrizione.DIAR_EMB_SHA.lower():
                 raise ValueError("modello voci: il file scaricato non corrisponde all'impronta.")
             os.replace(emb_tmp, tmp / "wespeaker-embedding.onnx")
@@ -1750,6 +1925,53 @@ class Api:
             if DIAR_DIR.exists():
                 DIAR_DIR.rename(old)
             tmp.rename(DIAR_DIR)
+            shutil.rmtree(old, ignore_errors=True)
+        except Exception:
+            shutil.rmtree(tmp, ignore_errors=True)
+            raise
+
+    def _install_diarization_gpu(self):
+        """Installa ONNX Runtime CUDA + cuBLAS 13 + cuDNN 9 in DIAR_GPU_DIR condividendo EXE/modelli."""
+        if not self._diar_installed():
+            self._install_diarization()
+        tmp = DIAR_GPU_DIR.with_name(DIAR_GPU_DIR.name + ".new")
+        shutil.rmtree(tmp, ignore_errors=True)
+        tmp.mkdir(parents=True, exist_ok=True)
+        total = trascrizione.DIAR_GPU_TOTAL_SIZE
+        offset = 0
+        try:
+            for fname in trascrizione.DIAR_GPU_SHARED_BINS:
+                src = DIAR_DIR / fname
+                dst = tmp / fname
+                try:
+                    os.link(src, dst)
+                except OSError:
+                    shutil.copy2(src, dst)
+            pkgs = trascrizione.DIAR_GPU_PACKAGES
+            for idx, pkg in enumerate(pkgs, 1):
+                prefix = pkg["prefix"]
+                allowed = pkg["files"]
+
+                def _keep(n, _p=prefix, _f=allowed):
+                    norm = n.replace("\\", "/")
+                    if _p and not norm.startswith(_p):
+                        return None
+                    base = norm.rsplit("/", 1)[-1]
+                    return base if base in _f else None
+
+                self._extract_zip_into(
+                    pkg["url"], f"{pkg['label']} ({idx}/{len(pkgs)})", tmp,
+                    _keep, pkg["sha"], event="model",
+                    progress_offset=offset, progress_total=total,
+                )
+                offset += pkg["size"]
+            if not all((tmp / f).is_file() for f in trascrizione.DIAR_GPU_REQUIRED_FILES):
+                raise ValueError("installazione accelerazione GPU interlocutori incompleta.")
+            old = DIAR_GPU_DIR.with_name(DIAR_GPU_DIR.name + ".old")
+            shutil.rmtree(old, ignore_errors=True)
+            if DIAR_GPU_DIR.exists():
+                DIAR_GPU_DIR.rename(old)
+            tmp.rename(DIAR_GPU_DIR)
             shutil.rmtree(old, ignore_errors=True)
         except Exception:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -1769,8 +1991,35 @@ class Api:
             log.exception("motore interlocutori non installato")
             return {"ok": False, "error": str(e)}
 
+    def whisper_diarize_gpu(self, enable):
+        if not enable:
+            self.save_settings({"whisper_diarize_gpu": False})
+            return {"ok": True, **self.whisper_info()}
+        sysinfo = self._system()
+        if not sysinfo["nvidia"]:
+            return {"ok": False, "error": "Su questo PC non c'è una scheda NVIDIA."}
+        if sysinfo.get("driver_major") and sysinfo["driver_major"] < trascrizione.DIAR_GPU_MIN_DRIVER:
+            return {"ok": False,
+                    "error": f"Serve un driver NVIDIA ≥ {trascrizione.DIAR_GPU_MIN_DRIVER} "
+                             f"(attuale: {sysinfo['driver_version']}). Aggiorna il driver NVIDIA e riprova."}
+        try:
+            if not self._diar_gpu_installed():
+                self._install_diarization_gpu()
+            self.save_settings({"whisper_diarize": True, "whisper_diarize_gpu": True})
+            log.info("accelerazione NVIDIA per interlocutori attivata")
+            return {"ok": True, **self.whisper_info()}
+        except Exception as e:
+            log.exception("accelerazione GPU interlocutori non installata")
+            return {"ok": False, "error": str(e)}
+
+    def whisper_diarize_gpu_delete(self):
+        self.save_settings({"whisper_diarize_gpu": False})
+        shutil.rmtree(DIAR_GPU_DIR, ignore_errors=True)
+        return {"ok": True, **self.whisper_info()}
+
     def whisper_diarize_delete(self):
-        self.save_settings({"whisper_diarize": False})
+        self.save_settings({"whisper_diarize": False, "whisper_diarize_gpu": False})
+        shutil.rmtree(DIAR_GPU_DIR, ignore_errors=True)
         shutil.rmtree(DIAR_DIR, ignore_errors=True)
         return {"ok": True, **self.whisper_info()}
 
@@ -2022,6 +2271,40 @@ class Api:
         self._set_corners(rounded=True)
         self._lock_navigation()
 
+    def _on_loaded(self):
+        if self._dnd_bound or not self._window:
+            return
+        try:
+            from webview.dom import DOMEventHandler
+            # prevent_default=True impedisce a WebView2 di aprire il file;
+            # stop_propagation=False lascia funzionare il drop dei link nella scheda Scarica
+            self._window.dom.document.events.drop += DOMEventHandler(self._on_dom_drop, True, False)
+            self._dnd_bound = True
+        except Exception:
+            log.exception("drag-and-drop file non attivato")
+
+    def _on_dom_drop(self, event):
+        """Riceve i percorsi reali dei file trascinati da Esplora File via pywebview/WebView2."""
+        if not isinstance(event, dict):
+            return
+        dt = event.get("dataTransfer")
+        raw_files = dt.get("files") if isinstance(dt, dict) else None
+        if not raw_files:
+            return
+        paths = [f.get("pywebviewFullPath") for f in raw_files
+                 if isinstance(f, dict) and isinstance(f.get("pywebviewFullPath"), str) and f.get("pywebviewFullPath")]
+        if not paths:
+            return
+        view = self._active_view
+        if view == "convert":
+            items, skipped = self._collect_convert_files(paths)
+            self._emit("dropped_files", {"target": "convert", "files": items, "skipped": skipped})
+        elif view == "transcribe":
+            items, skipped = self._collect_transcribe_files(paths)
+            self._emit("dropped_files", {"target": "transcribe", "files": items, "skipped": skipped})
+        elif view != "download":
+            self._emit("dropped_files", {"target": "other", "files": [], "skipped": len(paths)})
+
     def _lock_navigation(self):
         """La finestra deve mostrare solo la pagina dell'app: qualunque altra pagina caricata lì
         dentro (es. un link trascinato sulla finestra) riceverebbe i comandi di Python."""
@@ -2041,7 +2324,7 @@ class Api:
                     args.Cancel = True
 
             def apply():
-                view.AllowExternalDrop = False        # niente file o link trascinati dentro
+                view.AllowExternalDrop = True         # serve per trascinare file su Converti/Trascrivi; la navigazione resta bloccata sotto
                 view.NavigationStarting += on_navigation
 
             self._nav_handler = on_navigation         # resta in vita finché esiste la finestra
@@ -2380,6 +2663,7 @@ def main():
     )
     api._window = window
     window.events.shown += api._on_shown
+    window.events.loaded += api._on_loaded
     threading.Thread(target=lambda: (time.sleep(5), api._diagnostics()), daemon=True).start()
     try:
         webview.start(debug="--debug" in sys.argv)

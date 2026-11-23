@@ -225,6 +225,68 @@ DIAR_TOTAL_SIZE = DIAR_ENGINE_SIZE + DIAR_SEG_SIZE + DIAR_EMB_SIZE
 DIAR_PROGRESS_RE = re.compile(r"progress\s+([\d.]+)%")
 DIAR_LINE_RE = re.compile(r"^\s*([\d.]+)\s+--\s+([\d.]+)\s+speaker_(\d+)\b")
 
+# ---------- accelerazione GPU interlocutori (ONNX Runtime CUDA 13 + cuDNN 9) ----------
+DIAR_GPU_MIN_DRIVER = 580
+DIAR_GPU_SHARED_BINS = (
+    "sherpa-onnx-offline-speaker-diarization.exe",
+    "sherpa-onnx-c-api.dll",
+    "sherpa-onnx-cxx-api.dll",
+)
+DIAR_GPU_PACKAGES = (
+    {
+        "label": "ONNX Runtime CUDA",
+        "url": "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime.gpu.windows/1.32.0/microsoft.ml.onnxruntime.gpu.windows.1.32.0.nupkg",
+        "sha": "485c1af4e5719d7336c2f1cdf6d3342a3fcec88d3bad9621e33a283fff77c4c7",
+        "size": 155209053,
+        "prefix": "runtimes/win-x64/native/",
+        "files": (
+            "onnxruntime.dll",
+            "onnxruntime_providers_shared.dll",
+            "onnxruntime_providers_cuda.dll",
+        ),
+    },
+    {
+        "label": "CUDA cuBLAS",
+        "url": "https://files.pythonhosted.org/packages/a3/df/f1246959833e2c437db8be3e5b477f66b87f8817821ed40de6c7561c9a36/nvidia_cublas-13.8.0.4-py3-none-win_amd64.whl",
+        "sha": "8c5494423bb8a46822cb6b0cb95d7fa4be2d7b96a31155dff083839ec8297910",
+        "size": 423266897,
+        "prefix": "",
+        "files": ("cublas64_13.dll", "cublasLt64_13.dll"),
+    },
+    {
+        "label": "CUDA runtime",
+        "url": "https://files.pythonhosted.org/packages/35/99/e07dd9565d2e0317c1a62ff39ae9fc0542c048f74bcfc777c8be97710347/nvidia_cuda_runtime-13.5.37-py3-none-win_amd64.whl",
+        "sha": "f225d3fa5ea6bfbb58fc4979ef72375cbe661d9107f0d8a4ff22cc151525e4a9",
+        "size": 2780254,
+        "prefix": "",
+        "files": ("cudart64_13.dll",),
+    },
+    {
+        "label": "cuDNN 9",
+        "url": "https://files.pythonhosted.org/packages/48/9c/26e6bdd31c97c389aa565b49c916be0dec17dd61dad6cd33fee286d1b946/nvidia_cudnn_cu13-9.28.1.4-py3-none-win_amd64.whl",
+        "sha": "73d874c6bd8a1c75ca040228f77c4e163efe9bab3b65bd85914e2b7334ac68ee",
+        "size": 407065099,
+        "prefix": "",
+        "files": (
+            "cudnn64_9.dll",
+            "cudnn_adv64_9.dll",
+            "cudnn_cnn64_9.dll",
+            "cudnn_engines_precompiled64_9.dll",
+            "cudnn_engines_runtime_compiled64_9.dll",
+            "cudnn_engines_tensor_ir64_9.dll",
+            "cudnn_ext64_9.dll",
+            "cudnn_graph64_9.dll",
+            "cudnn_heuristic64_9.dll",
+            "cudnn_ops64_9.dll",
+        ),
+    },
+)
+DIAR_GPU_TOTAL_SIZE = sum(p["size"] for p in DIAR_GPU_PACKAGES)
+DIAR_GPU_REQUIRED_FILES = DIAR_GPU_SHARED_BINS + tuple(f for p in DIAR_GPU_PACKAGES for f in p["files"])
+DIAR_GPU_FAIL_RE = re.compile(
+    r"Failed to enable CUDA|Fallback to cpu|Please compile with -DSHERPA_ONNX_ENABLE_GPU", re.I
+)
+
 _SRT_TIME_RE = re.compile(r"(\d{1,2}):(\d{2}):(\d{2})[,.](\d{3})")
 _SPEAKER_PREFIX_RE = re.compile(r"^\[([^\[\]\n]{1,40})\]\s+(.*)$", re.S)
 _TXT_TS_PREFIX_RE = re.compile(r"^\[(\d{1,2}:)?(\d{1,2}):(\d{2})\]\s+(.*)$")
@@ -388,3 +450,29 @@ def format_srt(segments: list[dict], include_speakers: bool = True) -> str:
         blocks.append(f"{idx}\n{format_srt_time(float(s['start']))} --> {format_srt_time(float(s['end']))}\n{prefix}{txt}")
         idx += 1
     return ("\n\n".join(blocks) + "\n") if blocks else ""
+
+
+def parse_driver_major(driver_version: str) -> int:
+    """Estrae la versione principale del driver NVIDIA (es. '581.29' -> 581), o 0."""
+    m = re.match(r"^\s*(\d+)", str(driver_version or ""))
+    return int(m.group(1)) if m else 0
+
+
+def build_diar_cmd(exe: str, seg_model: str, emb_model: str, wav: str,
+                   num_speakers: int = 0, use_gpu: bool = False, threads: int = 4) -> list[str]:
+    """Costruisce gli argomenti CLI per sherpa-onnx-offline-speaker-diarization."""
+    prov = "cuda" if use_gpu else "cpu"
+    n_thr = 2 if use_gpu else max(1, int(threads or 1))
+    args = [
+        str(exe),
+        f"--segmentation.pyannote-model={seg_model}",
+        f"--segmentation.provider={prov}",
+        f"--segmentation.num-threads={n_thr}",
+        f"--embedding.model={emb_model}",
+        f"--embedding.provider={prov}",
+        f"--embedding.num-threads={n_thr}",
+    ]
+    if num_speakers and int(num_speakers) > 0:
+        args.append(f"--clustering.num-clusters={int(num_speakers)}")
+    args.append(str(wav))
+    return args

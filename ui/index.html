@@ -177,6 +177,12 @@ select:disabled{opacity:.4;cursor:default}
 .tag.k-image{color:#f9a8d4;background:color-mix(in srgb,var(--c-image) 13%,transparent);border-color:color-mix(in srgb,var(--c-image) 34%,var(--line-2))}
 .tag.k-text{color:#6ee7b7;background:color-mix(in srgb,var(--c-text) 13%,transparent);border-color:color-mix(in srgb,var(--c-text) 34%,var(--line-2))}
 .tag.k-clip{color:#fcd34d;background:color-mix(in srgb,var(--c-amber) 12%,transparent);border-color:color-mix(in srgb,var(--c-amber) 32%,var(--line-2))}
+.tag.k-gpu{color:#6ee7b7;background:color-mix(in srgb,var(--c-text) 14%,transparent);border-color:color-mix(in srgb,var(--c-text) 38%,var(--line-2))}
+.gpu-pill{display:inline-flex;align-items:center;gap:7px;height:30px;padding:0 11px;border-radius:8px;background:var(--glass);border:1px solid var(--glass-line);font-size:12px;color:var(--muted);cursor:pointer;transition:border-color .15s,color .15s,background .15s}
+.gpu-pill.on{border-color:color-mix(in srgb,var(--c-audio) 42%,var(--glass-line));color:var(--text)}
+.gpu-pill i{width:7px;height:7px;border-radius:50%;background:var(--dim)}
+.gpu-pill.on i{background:var(--ok);box-shadow:0 0 8px var(--ok)}
+.gpu-pill:disabled{cursor:default;opacity:.65}
 
 /* ---------- avviso di aggiornamento ---------- */
 .update-banner{max-width:860px;margin:0 auto 22px;display:flex;align-items:center;gap:14px;padding:12px 14px;border-radius:var(--r);
@@ -295,9 +301,12 @@ select:disabled{opacity:.4;cursor:default}
 .clip-dur{font-size:11.5px;color:var(--dim);margin-left:auto}
 
 /* ---------- converti e trascrivi ---------- */
-.drop-card{padding:16px 18px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.drop-card{padding:16px 18px;display:flex;align-items:center;gap:14px;flex-wrap:wrap;transition:border-color .15s,background .15s,box-shadow .15s}
 #view-convert .drop-card{border-color:color-mix(in srgb,var(--c-audio) 26%,var(--glass-line));background:linear-gradient(120deg,rgba(56,189,248,.07),var(--glass) 58%)}
 #view-transcribe .drop-card{border-color:color-mix(in srgb,var(--c-text) 26%,var(--glass-line));background:linear-gradient(120deg,rgba(52,211,153,.07),var(--glass) 58%)}
+.drop-card.dragover{border-style:dashed;box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 18%,transparent)}
+#view-convert .drop-card.dragover{border-color:var(--c-audio);background:linear-gradient(120deg,rgba(56,189,248,.16),var(--glass-2) 60%);box-shadow:0 0 0 3px rgba(56,189,248,.18)}
+#view-transcribe .drop-card.dragover{border-color:var(--c-text);background:linear-gradient(120deg,rgba(52,211,153,.16),var(--glass-2) 60%);box-shadow:0 0 0 3px rgba(52,211,153,.18)}
 .drop-ico{width:38px;height:38px;border-radius:10px;flex:none;display:grid;place-items:center;border:1px solid var(--glass-line);background:rgba(255,255,255,.04)}
 .drop-ico svg{width:19px;height:19px}
 #view-convert .drop-ico{color:var(--c-audio);background:rgba(56,189,248,.11);border-color:rgba(56,189,248,.28)}
@@ -544,13 +553,18 @@ select:disabled{opacity:.4;cursor:default}
 
     <!-- CONVERTI -->
     <section class="view" id="view-convert">
-      <h1>Converti <span class="g">qualsiasi file</span></h1>
-      <p class="sub">Video, audio e immagini elaborati sul tuo PC senza inviare nulla online.</p>
-      <div class="panel drop-card">
+      <div class="tr-bar">
+        <div>
+          <h1>Converti <span class="g">qualsiasi file</span></h1>
+          <p class="sub" style="margin-bottom:0">Video, audio e immagini elaborati sul tuo PC senza inviare nulla online.</p>
+        </div>
+        <button type="button" class="gpu-pill" id="convGpuPill" title="Attiva o disattiva accelerazione GPU per la conversione video"><i></i><span id="convGpuLbl">GPU…</span></button>
+      </div>
+      <div class="panel drop-card" id="convDropCard">
         <div class="drop-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3l4 4-4 4"/><path d="M3 11V9a2 2 0 0 1 2-2h16"/><path d="M7 21l-4-4 4-4"/><path d="M21 13v2a2 2 0 0 1-2 2H3"/></svg></div>
         <div class="info">
           <b>Seleziona file da convertire</b>
-          <span>Elaborazione offline sul tuo PC, anche più file insieme.</span>
+          <span>Trascina qui uno o più file, oppure clicca «Scegli file…».</span>
         </div>
         <button class="btn primary" id="convPickBtn">Scegli file…</button>
       </div>
@@ -599,11 +613,11 @@ select:disabled{opacity:.4;cursor:default}
         </div>
         <div class="model-pill" id="trModelPill"><span id="trModelLbl">Nessun modello</span> · <a id="trModelGo">cambia</a></div>
       </div>
-      <div class="panel drop-card">
+      <div class="panel drop-card" id="trDropCard">
         <div class="drop-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M8 21h8"/></svg></div>
         <div class="info">
           <b>Scegli audio o video dal PC</b>
-          <span>Più file insieme (MP3, M4A, WAV, MP4, MKV, MOV, WEBM…).</span>
+          <span>Trascina qui audio o video (MP3, M4A, WAV, MP4, MKV, MOV…), oppure clicca «Scegli file…».</span>
         </div>
         <button class="btn primary" id="trPickBtn">Scegli file…</button>
       </div>
@@ -631,6 +645,10 @@ select:disabled{opacity:.4;cursor:default}
         <div class="row" id="trSpeakersRow" hidden>
           <div class="lbl"><b>Numero di persone</b><span>Lascia "Automatico" se non sai quante voci ci sono.</span></div>
           <select id="setTrSpeakers"><option value="0">Automatico</option><option value="2">2 persone</option><option value="3">3 persone</option><option value="4">4 persone</option><option value="5">5 persone</option><option value="6">6 persone</option></select>
+        </div>
+        <div class="row" id="trDiarGpuRow" hidden>
+          <div class="lbl"><b>Interlocutori su GPU NVIDIA</b><span id="trDiarGpuHint"></span></div>
+          <div class="toggle" id="setTrDiarGpu"></div>
         </div>
         <div class="row">
           <div class="lbl"><b>Lingua dell'audio</b><span>Scegliere la lingua rende il riconoscimento più preciso.</span></div>
@@ -714,6 +732,14 @@ select:disabled{opacity:.4;cursor:default}
         </div>
       </div>
 
+      <div class="group-label">Conversione</div>
+      <div class="panel">
+        <div class="row" id="convGpuRow">
+          <div class="lbl"><b>Conversione video con GPU</b><span id="convGpuText">Usa la scheda video per convertire i file molto più velocemente, con passaggio automatico al processore se un formato non è supportato.</span></div>
+          <div class="toggle" id="setConvGpu"></div>
+        </div>
+      </div>
+
       <div class="group-label" id="trascrizione">Trascrizione (Whisper)</div>
       <div class="panel">
         <div class="row">
@@ -730,6 +756,10 @@ select:disabled{opacity:.4;cursor:default}
         <div class="row" id="diarRow">
           <div class="lbl"><b>Separazione interlocutori (sherpa-onnx)</b><span id="diarText"></span><div id="diarProgress"></div></div>
           <div style="display:flex;gap:6px;align-items:center"><button class="btn sm danger" id="diarDeleteBtn" hidden>Elimina</button><div class="toggle" id="setDiar"></div></div>
+        </div>
+        <div class="row" id="diarGpuRow" hidden>
+          <div class="lbl"><b>Interlocutori sulla scheda NVIDIA</b><span id="diarGpuText"></span><div id="diarGpuProgress"></div></div>
+          <div style="display:flex;gap:6px;align-items:center"><button class="btn sm danger" id="diarGpuDeleteBtn" hidden>Elimina</button><div class="toggle" id="setDiarGpu"></div></div>
         </div>
       </div>
       <div class="models" id="models"></div>
@@ -891,7 +921,7 @@ function toast(msg, color="var(--accent)"){
   $("#toasts").appendChild(t); setTimeout(()=>{t.style.transition="opacity .25s";t.style.opacity=0;setTimeout(()=>t.remove(),250)}, 4200);
 }
 
-let api, settings = {}, jobs = {}, history = [], current = null;
+let api, settings = {}, jobs = {}, history = [], current = null, activeView = "download";
 
 /* ---------- finestra ---------- */
 $("#drag").addEventListener("mousedown", e => { if(e.button===0 && e.detail===1) api.win_drag(); });
@@ -911,6 +941,8 @@ async function toggleMax(){
 
 /* ---------- navigazione ---------- */
 function goView(name){
+  activeView = name;
+  api?.set_view?.(name);
   document.querySelectorAll(".nav").forEach(x=>x.classList.toggle("active", x.dataset.view===name));
   document.querySelectorAll(".view").forEach(v=>v.classList.toggle("active", v.id==="view-"+name));
   if(name==="history") renderHistory();
@@ -1069,6 +1101,63 @@ $("#analyzeBtn").onclick = analyze;
   });
 })();
 
+(() => {
+  const VIDEO_EXT = new Set(["mp4","mkv","webm","mov","avi","flv","ts","m4v","3gp","wmv"]);
+  const AUDIO_EXT = new Set(["mp3","m4a","wav","flac","ogg","oga","opus","aac","wma","aiff","weba","mka"]);
+  const IMAGE_EXT = new Set(["png","jpg","jpeg","webp","ico","bmp","tif","tiff"]);
+  const hasFiles = dt => Array.from(dt?.types || []).includes("Files");
+  let fileDragDepth = 0;
+
+  function setDropHighlight(on){
+    $("#convDropCard").classList.toggle("dragover", on && activeView === "convert");
+    $("#trDropCard").classList.toggle("dragover", on && activeView === "transcribe");
+  }
+  function resetDrag(){ fileDragDepth = 0; setDropHighlight(false); }
+
+  document.addEventListener("dragenter", e => {
+    if(!hasFiles(e.dataTransfer)) return;
+    e.preventDefault();
+    fileDragDepth++;
+    setDropHighlight(true);
+  });
+  document.addEventListener("dragover", e => {
+    if(!hasFiles(e.dataTransfer)) return;
+    e.preventDefault();
+    if(e.dataTransfer){
+      e.dataTransfer.dropEffect = (activeView === "convert" || activeView === "transcribe" || activeView === "download") ? "copy" : "none";
+    }
+  });
+  document.addEventListener("dragleave", () => {
+    if(fileDragDepth > 0){
+      fileDragDepth--;
+      if(!fileDragDepth) setDropHighlight(false);
+    }
+  });
+  document.addEventListener("dragend", resetDrag);
+  window.addEventListener("blur", resetDrag);
+  document.addEventListener("drop", e => {
+    if(!hasFiles(e.dataTransfer)) return;
+    e.preventDefault();
+    resetDrag();
+    if(!window.pywebview && e.dataTransfer?.files?.length && (activeView === "convert" || activeView === "transcribe")){
+      const out = [];
+      let skipped = 0;
+      for(const f of Array.from(e.dataTransfer.files)){
+        const ext = (f.name.split(".").pop() || "").toLowerCase();
+        const kind = VIDEO_EXT.has(ext) ? "video" : AUDIO_EXT.has(ext) ? "audio" : IMAGE_EXT.has(ext) ? "image" : null;
+        if(!kind || (activeView === "transcribe" && kind === "image")){ skipped++; continue; }
+        if(activeView === "convert"){
+          out.push({path:"C:\\Demo\\" + f.name, name:f.name, folder:"C:\\Demo", kind, ext, size:f.size || 1024,
+            duration: kind === "image" ? null : 30, dims: kind === "image" ? "1920×1080" : null});
+        } else {
+          out.push({path:"C:\\Demo\\" + f.name, name:f.name, folder:"C:\\Demo", size:f.size || 1024});
+        }
+      }
+      handleDroppedFiles({target: activeView, files: out, skipped});
+    }
+  });
+})();
+
 async function analyze(){
   const list = urls();
   if(!list.length){ toast("Incolla un link valido", "var(--warn)"); return; }
@@ -1134,6 +1223,7 @@ function renderJobList(container, list, emptySvg, emptyMsg){
       siteHTML(siteOf(j.url || "", j.site)),
       `<span class="tag k-${esc(kind)}">${esc(j.quality)}</span>`
     ];
+    if(j.hw) left.push(`<span class="tag k-gpu">${esc(j.hw)}</span>`);
     if(j.clip) left.push(`<span class="tag k-clip">${esc(j.clip)}</span>`);
     if(j.item) left.push(`<span class="tag">${esc(j.item)}</span>`);
     if(j.current) left.push(`<span class="now" title="${esc(j.current)}">${esc(j.current)}</span>`);
@@ -1284,19 +1374,6 @@ $("#histViewSeg").onclick = e => {
   $("#histViewSeg").querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
   renderHistory();
 };
-$("#histSearch").oninput = renderHistory;
-$("#histFilterSeg").onclick = e => {
-  const b = e.target.closest("button[data-f]"); if(!b) return;
-  histFilter = b.dataset.f;
-  $("#histFilterSeg").querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
-  renderHistory();
-};
-$("#histViewSeg").onclick = e => {
-  const b = e.target.closest("button[data-view]"); if(!b) return;
-  histView = b.dataset.view;
-  $("#histViewSeg").querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
-  renderHistory();
-};
 /* conferma nello stile dell'app, al posto del confirm() del browser (che mostra "127.0.0.1 says") */
 function ask(title, text, yesLabel = "Conferma", danger = true){
   return new Promise(resolve => {
@@ -1327,6 +1404,7 @@ function renderSettings(){
   $("#setCookies").value = settings.cookies; $("#setPlaylist").classList.toggle("on", !!settings.playlist);
   $("#setCookieWhen").value = settings.cookie_when || "auto"; $("#setCookieWhen").disabled = settings.cookies === "none";
   renderConvDest();
+  renderConvertGpu();
   renderTranscribeTab();
 }
 $("#setCookieWhen").onchange = e => save({cookie_when:e.target.value});
@@ -1374,7 +1452,34 @@ const CONV_OUT = {
 const VIDEO_PRESETS = [["balanced","Bilanciata"],["high","Alta qualità"],["compact10","Compatta < 10 MB"]];
 const AUDIO_KBPS = [["320","320 kbps (Massima)"],["192","192 kbps (Consigliata)"],["128","128 kbps (Leggera)"],["96","96 kbps"]];
 const IMG_QUALS = [["92","Alta (92%)"],["85","Bilanciata (85%)"],["70","Leggera (70%)"]];
-let convFiles = [];
+let convFiles = [], convInfo = null;
+
+async function loadConvertInfo(){ convInfo = await api.convert_info(); renderConvertGpu(); }
+function renderConvertGpu(){
+  const on = settings.convert_gpu !== false;
+  const pill = $("#convGpuPill"), lbl = $("#convGpuLbl");
+  if(!convInfo){
+    pill.disabled = true; pill.classList.remove("on"); lbl.textContent = "GPU…";
+  } else if(convInfo.gpu_available){
+    pill.disabled = false; pill.classList.toggle("on", on);
+    lbl.textContent = `${convInfo.label || "GPU"} · ${on ? "attiva" : "spenta"}`;
+  } else {
+    pill.disabled = true; pill.classList.remove("on"); lbl.textContent = "Solo processore";
+  }
+  const tog = $("#setConvGpu"), txt = $("#convGpuText");
+  if(!convInfo){
+    tog.classList.toggle("on", on); tog.style.pointerEvents = ""; tog.style.opacity = "";
+  } else if(convInfo.gpu_available){
+    tog.classList.toggle("on", on); tog.style.pointerEvents = ""; tog.style.opacity = "";
+    txt.textContent = `Usa ${convInfo.label}${convInfo.gpu_name ? " (" + convInfo.gpu_name + ")" : ""} per convertire i video molto più velocemente (MP4, MKV, MOV${convInfo.webm ? ", WEBM" : ""}), con passaggio automatico al processore se un formato non è supportato.`;
+  } else {
+    tog.classList.remove("on"); tog.style.pointerEvents = "none"; tog.style.opacity = ".45";
+    txt.textContent = "Nessun encoder video hardware rilevato su questo PC (la conversione usa il processore).";
+  }
+}
+const toggleConvGpu = () => { if(convInfo?.gpu_available) save({convert_gpu: settings.convert_gpu === false}); };
+$("#convGpuPill").onclick = toggleConvGpu;
+$("#setConvGpu").onclick = toggleConvGpu;
 
 function allowedConvFmts(){
   if(!convFiles.length) return [];
@@ -1445,13 +1550,15 @@ function renderConvFiles(){
   renderConvDest();
   syncConvControls();
 }
-$("#convPickBtn").onclick = async () => {
-  const res = await api.pick_convert_files();
-  if(!res || !res.length) return;
+function appendConvFiles(list){
+  if(!list || !list.length) return 0;
   const seen = new Set(convFiles.map(x => x.path));
-  for(const f of res) if(!seen.has(f.path)){ seen.add(f.path); convFiles.push(f); }
-  renderConvFiles();
-};
+  let added = 0;
+  for(const f of list) if(!seen.has(f.path)){ seen.add(f.path); convFiles.push(f); added++; }
+  if(added) renderConvFiles();
+  return added;
+}
+$("#convPickBtn").onclick = async () => { appendConvFiles(await api.pick_convert_files()); };
 $("#convFiles").onclick = e => {
   const b = e.target.closest("button[data-rm]"); if(!b) return;
   convFiles.splice(+b.dataset.rm, 1); renderConvFiles();
@@ -1471,6 +1578,7 @@ $("#convStartBtn").onclick = async () => {
     image_quality: isImg ? +(pv || 85) : 85,
     image_max_side: isImg && !$("#convImgResizeWrap").hidden ? +($("#convImgResize").value || 0) : 0,
     dest_mode: settings.convert_dest === "downloads" ? "downloads" : "same",
+    use_gpu: settings.convert_gpu !== false,
   };
   const ids = await api.start_convert(convFiles, opts);
   if(ids && ids.length){
@@ -1503,9 +1611,18 @@ function renderTranscribeTab(){
   $("#setTrLang").value = lang;
   const d = downloading && downloading.id === "diar" ? downloading : null;
   if(d) $("#trDiarizeHint").textContent = `Scarico componenti offline: ${fmtBytes(d.done)}${d.total ? " di " + fmtBytes(d.total) : ""}…`;
-  else if(winfo?.diar_on) $("#trDiarizeHint").textContent = "Attiva: assegna chi parla ad ogni frase (puoi rinominare gli interlocutori nel lettore).";
+  else if(winfo?.diar_on) $("#trDiarizeHint").textContent = `Attiva${winfo?.diar_gpu_on ? " su GPU NVIDIA" : ""}: assegna chi parla ad ogni frase (puoi rinominare gli interlocutori nel lettore).`;
   else if(winfo?.diar_installed) $("#trDiarizeHint").textContent = "Motore già scaricato offline: attiva per separare le voci in qualsiasi lingua.";
   else $("#trDiarizeHint").innerHTML = 'Riconosce automaticamente chi parla (<code style="font-family:var(--mono)">Interlocutore 1</code>, <code style="font-family:var(--mono)">2</code>…). Richiede 61 MB una tantum all\'attivazione.';
+
+  const diarGpuVisible = !!(winfo?.system?.nvidia && diar);
+  $("#trDiarGpuRow").hidden = !diarGpuVisible;
+  $("#setTrDiarGpu").classList.toggle("on", !!winfo?.diar_gpu_on);
+  const dg = downloading && downloading.id === "diar_gpu" ? downloading : null;
+  if(dg) $("#trDiarGpuHint").textContent = `Scarico componenti GPU: ${fmtBytes(dg.done)}${dg.total ? " di " + fmtBytes(dg.total) : ""}…`;
+  else if(winfo?.diar_gpu_on) $("#trDiarGpuHint").textContent = `Attiva sulla ${winfo.system.gpu_name || "scheda NVIDIA"}: riconoscimento voci accelerato su GPU.`;
+  else if(winfo?.diar_gpu_installed) $("#trDiarGpuHint").textContent = "Motore CUDA già scaricato offline: attiva per usare la scheda NVIDIA.";
+  else $("#trDiarGpuHint").textContent = `Usa la ${winfo?.system?.gpu_name || "scheda NVIDIA"} invece del processore (~943 MB una tantum · richiede driver NVIDIA ≥ ${winfo?.diar_gpu_min_driver || 580}).`;
 }
 function renderTrFiles(){
   $("#trFilesWrap").hidden = !trFiles.length;
@@ -1514,13 +1631,15 @@ function renderTrFiles(){
   $("#trFiles").innerHTML = trFiles.map((f, i) => fileRowHTML(IC.file, f.name, `${fmtBytes(f.size)}${f.folder ? " · in " + folderShort(f.folder) : ""}`, i)).join("");
 }
 $("#trModelGo").onclick = e => { e.preventDefault(); goModels(); };
-$("#trPickBtn").onclick = async () => {
-  const res = await api.pick_transcribe_files();
-  if(!res || !res.length) return;
+function appendTrFiles(list){
+  if(!list || !list.length) return 0;
   const seen = new Set(trFiles.map(x => x.path));
-  for(const f of res) if(!seen.has(f.path)){ seen.add(f.path); trFiles.push(f); }
-  renderTrFiles();
-};
+  let added = 0;
+  for(const f of list) if(!seen.has(f.path)){ seen.add(f.path); trFiles.push(f); added++; }
+  if(added) renderTrFiles();
+  return added;
+}
+$("#trPickBtn").onclick = async () => { appendTrFiles(await api.pick_transcribe_files()); };
 $("#trFiles").onclick = e => {
   const b = e.target.closest("button[data-rm]"); if(!b) return;
   trFiles.splice(+b.dataset.rm, 1); renderTrFiles();
@@ -1578,9 +1697,45 @@ async function toggleDiarize(){
 $("#setTrDiarize").onclick = toggleDiarize;
 $("#setDiar").onclick = toggleDiarize;
 $("#diarDeleteBtn").onclick = async () => {
-  if(!await ask("Togliere il motore interlocutori?", `Libera ${fmtBytes(winfo.diar_disk)} su disco; la trascrizione continuerà senza dividere le voci. Potrai riscaricarlo quando vuoi.`, "Elimina")) return;
+  const freed = (winfo.diar_disk || 0) + (winfo.diar_gpu_disk || 0);
+  if(!await ask("Togliere il motore interlocutori?", `Libera ${fmtBytes(freed)} su disco; la trascrizione continuerà senza dividere le voci. Potrai riscaricarlo quando vuoi.`, "Elimina")) return;
   winfo = await api.whisper_diarize_delete();
   settings.whisper_diarize = false;
+  settings.whisper_diarize_gpu = false;
+  renderWhisper();
+};
+
+async function toggleDiarizeGpu(){
+  if(downloading) return;
+  const enable = !winfo?.diar_gpu_on;
+  if(enable && !winfo?.diar_gpu_installed){
+    const sys = winfo?.system || {};
+    const minDrv = winfo?.diar_gpu_min_driver || 580;
+    if(sys.driver_major && sys.driver_major < minDrv){
+      toast(`Serve un driver NVIDIA ≥ ${minDrv} (attuale: ${sys.driver_version}). Aggiorna il driver NVIDIA e riprova.`, "var(--err)");
+      return;
+    }
+    if(!await ask("Usare la GPU NVIDIA per gli interlocutori?",
+      "Per accelerare il riconoscimento delle voci sulla scheda NVIDIA AxTools scarica una volta sola ONNX Runtime CUDA, cuBLAS e cuDNN 9 (~943 MB). "
+      + "Richiede un driver NVIDIA ≥ 580; se dovesse dare problemi, AxTools passa automaticamente al processore. Puoi eliminare tutto quando vuoi.",
+      "Scarica e attiva", false)) return;
+    downloading = {id: "diar_gpu", done: 0, total: winfo?.diar_gpu_size || 988321303, label: "GPU interlocutori"};
+    renderWhisper();
+  }
+  const r = await api.whisper_diarize_gpu(enable);
+  downloading = null;
+  if(r.ok){
+    winfo = r; settings.whisper_diarize_gpu = !!r.diar_gpu_on; settings.whisper_diarize = !!r.diar_on;
+    renderWhisper();
+    if(enable) toast("Accelerazione NVIDIA attiva per gli interlocutori", "var(--ok)");
+  } else { renderWhisper(); toast(r.error || "Installazione non riuscita", "var(--err)"); }
+}
+$("#setTrDiarGpu").onclick = toggleDiarizeGpu;
+$("#setDiarGpu").onclick = toggleDiarizeGpu;
+$("#diarGpuDeleteBtn").onclick = async () => {
+  if(!await ask("Togliere accelerazione GPU interlocutori?", `Libera ${fmtBytes(winfo.diar_gpu_disk)} su disco; la separazione voci tornerà sul processore.`, "Elimina")) return;
+  winfo = await api.whisper_diarize_gpu_delete();
+  settings.whisper_diarize_gpu = false;
   renderWhisper();
 };
 
@@ -1603,6 +1758,14 @@ function renderWhisper(){
     ? `Riconosce automaticamente chi sta parlando (Pyannote + WeSpeaker, funziona in italiano e offline). Occupa ${fmtBytes(winfo.diar_disk)}: "Elimina" lo rimuove.`
     : `Riconosce automaticamente chi sta parlando in qualsiasi lingua usando Pyannote 3.0 + WeSpeaker (offline, 61 MB una tantum).`;
   renderDlBar($("#diarProgress"), downloading && downloading.id === "diar" ? downloading : null);
+
+  $("#diarGpuRow").hidden = !sys.nvidia;
+  $("#setDiarGpu").classList.toggle("on", !!winfo.diar_gpu_on);
+  $("#diarGpuDeleteBtn").hidden = !winfo.diar_gpu_installed || (downloading && downloading.id === "diar_gpu");
+  $("#diarGpuText").textContent = winfo.diar_gpu_installed
+    ? `Riconoscimento voci accelerato sulla ${sys.gpu_name || "scheda NVIDIA"}. Occupa ${fmtBytes(winfo.diar_gpu_disk)}: "Elimina" lo rimuove e si torna al processore.`
+    : `Esegue sherpa-onnx sulla ${sys.gpu_name || "scheda NVIDIA"} invece del processore (~943 MB una tantum per ONNX Runtime CUDA e cuDNN 9 · richiede driver NVIDIA ≥ ${winfo.diar_gpu_min_driver || 580}).`;
+  renderDlBar($("#diarGpuProgress"), downloading && downloading.id === "diar_gpu" ? downloading : null);
   renderTranscribeTab();
 
   $("#whisperStatus").textContent = (winfo.engine ? "Motore installato" : "Motore non ancora installato (9 MB, si scarica con il primo modello)")
@@ -1791,7 +1954,22 @@ $("#readerSaveBtn").onclick = async () => {
 };
 
 /* ---------- eventi dal backend ---------- */
+function handleDroppedFiles(data){
+  if(!data) return;
+  const files = data.files || [], skipped = data.skipped || 0;
+  if(data.target === "convert" || data.target === "transcribe"){
+    const added = data.target === "convert" ? appendConvFiles(files) : appendTrFiles(files);
+    if(added > 0 && skipped > 0) toast(`${added} file aggiunt${added===1?"o":"i"} (${skipped} non supportat${skipped===1?"o":"i"})`, "var(--ok)");
+    else if(added > 0) toast(`${added} file aggiunt${added===1?"o":"i"}`, "var(--ok)");
+    else if(files.length > 0) toast("File già presenti nell'elenco", "var(--warn)");
+    else toast(data.target === "convert" ? "Formato non supportato per la conversione" : "Formato non supportato: trascina file audio o video", "var(--warn)");
+  } else if(data.target === "other"){
+    toast("Per i file locali apri la scheda Converti o Trascrivi", "var(--accent)");
+  }
+}
+
 window.onBackend = (ev, data) => {
+  if(ev==="dropped_files"){ handleDroppedFiles(data); return; }
   if(ev==="model"){ if(downloading){ Object.assign(downloading, data); renderWhisper(); } return; }
   if(ev==="job"){
     const prevJob = jobs[data.id], prev = prevJob?.status; jobs[data.id] = data; renderQueues();
@@ -1813,7 +1991,7 @@ async function ensureDeps(){
   if(d.ytdlp && d.ffmpeg && d.deno) return;
   $("#setup").classList.add("show"); $("#setupRetry").style.display="none";
   const r = await api.install_deps();
-  if(r.ok){ $("#setup").classList.remove("show"); toast("Componenti installati", "var(--ok)"); loadVersion(); }
+  if(r.ok){ $("#setup").classList.remove("show"); toast("Componenti installati", "var(--ok)"); loadVersion(); loadConvertInfo(); }
   else { $("#setupLbl").textContent = "Errore: "+r.error; $("#setupRetry").style.display="inline-flex"; $("#depDot").style.background="var(--err)"; }
 }
 $("#setupRetry").onclick = ensureDeps;
@@ -1855,7 +2033,7 @@ async function init(){
   appInfo = await api.app_info();
   $("#appVer").textContent = `Versione ${appInfo.version}`; $("#aboutVer").textContent = appInfo.version;
   syncInput(); renderSettings(); renderOpts(); renderQueues();
-  await ensureDeps(); loadVersion(); loadWhisper();
+  await ensureDeps(); loadVersion(); loadWhisper(); loadConvertInfo();
   setTimeout(() => checkAppUpdate(false), 2500);
 }
 
@@ -1865,7 +2043,7 @@ setTimeout(() => { if(!api && !window.pywebview){ api = makeDemoApi(); init(); }
 
 function makeDemoApi(){
   const st = {folder:"C:\\Users\\Andrea\\Downloads", mode:"video", quality:"1080", audio_format:"m4a", cookies:"none", playlist:false, parallel:2,
-    whisper_model:"ggml-turbo.bin", whisper_lang:"it", whisper_timestamps:true, whisper_diarize:true, whisper_speakers:0, convert_dest:"same"};
+    whisper_model:"ggml-turbo.bin", whisper_lang:"it", whisper_timestamps:true, whisper_diarize:true, whisper_diarize_gpu:true, whisper_speakers:0, convert_dest:"same", convert_gpu:true};
   const th = "data:image/svg+xml," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 90"><rect width="160" height="90" fill="#26262c"/><path d="M0 70 L40 45 L70 62 L110 30 L160 58 V90 H0Z" fill="#33333a"/><circle cx="122" cy="22" r="8" fill="#7457f0"/></svg>');
   const demoTranscripts = {
     "demo-podcast.txt": {
@@ -1890,8 +2068,8 @@ function makeDemoApi(){
     mk("d","Video privato","Facebook","error",30,"720p","https://facebook.com/z",{error:"This video is only available for registered users. Use --cookies-from-browser"});
     mk("c","Mix lo-fi per studiare (0:30–2:00)","Youtube","done",100,"1080p","https://youtube.com/y",{clip:"0:30–2:00",file:"x"});
     mk("a","Lezione completa di fotografia notturna","Youtube","downloading",64,"2160p","https://youtube.com/x");
-    window.onBackend("job",{id:"cv1",kind:"convert",title:"clip_discord.mov",site:"File",mode:"video",status:"converting",percent:68,eta:9,quality:"MP4",folder:"C:\\Users\\Andrea\\Videos"});
-    window.onBackend("job",{id:"tr1",kind:"transcribe",title:"Intervista podcast episodio 14.mp3",site:"File",mode:"text",status:"done",percent:100,quality:"Testo",file:"demo-podcast.txt",folder:"C:\\Users\\Andrea\\Music"});
+    window.onBackend("job",{id:"cv1",kind:"convert",title:"clip_discord.mov",site:"File",mode:"video",status:"converting",percent:68,eta:9,quality:"MP4",hw:"GPU",folder:"C:\\Users\\Andrea\\Videos"});
+    window.onBackend("job",{id:"tr1",kind:"transcribe",title:"Intervista podcast episodio 14.mp3",site:"File",mode:"text",status:"done",percent:100,quality:"Testo",hw:"GPU",file:"demo-podcast.txt",folder:"C:\\Users\\Andrea\\Music"});
   }, 180);
 
   let maxed=false, nextId=1, convBatch=0;
@@ -1912,8 +2090,9 @@ function makeDemoApi(){
   const demoW = {engine:true, current:"ggml-turbo.bin", lang:"it", disk:574041195, recommended:"turbo",
     gpu_installed:false, gpu_on:false, gpu_disk:0,
     diar_installed:true, diar_on:true, diar_disk:60839352, diar_size:60839352,
+    diar_gpu_installed:true, diar_gpu_on:true, diar_gpu_disk:1290000000, diar_gpu_size:988321303, diar_gpu_min_driver:580,
     timestamps:true, speakers:0,
-    system:{ram:31.4,cores:16,nvidia:true,gpu_name:"NVIDIA GeForce RTX 5080"}, models:[
+    system:{ram:31.4,cores:16,nvidia:true,gpu_name:"NVIDIA GeForce RTX 5080",driver_version:"581.29",driver_major:581}, models:[
     W("tiny","Tiny",32152673,1,2,5,1,"Solo per provare o per PC molto vecchi: in italiano sbaglia spesso.",17,32166155),
     W("base","Base",59707625,2,3,5,1,"Appunti veloci con audio pulito, una sola persona che parla.",30,59721011),
     W("small","Small",190085487,3,4,4,2,"Il giusto mezzo per PC normali senza scheda video dedicata.",66,190098681),
@@ -1942,6 +2121,7 @@ function makeDemoApi(){
   return {
     get_settings: async()=>({...st}),
     save_settings: async p=>{ Object.assign(st,p); demoW.lang=st.whisper_lang||"auto"; return {...st}; },
+    set_view: async v=>v,
     get_history: async()=>hist,
     check_deps: async()=>({ytdlp:true, ffmpeg:true, deno:true}), version: async()=>"2026.10.26",
     get_info: async u=>{ await new Promise(r=>setTimeout(r,350)); return {ok:true,title:"Come costruire una piccola casa nel bosco, dall'inizio alla fine",uploader:"Canale Demo",duration:1337,thumbnail:th,site:siteOf(u).n||"YouTube",playlist:false,count:1,heights:[2160,1440,1080,720,480]}; },
@@ -1960,6 +2140,7 @@ function makeDemoApi(){
       });
       return id;
     },
+    convert_info: async()=>({gpu_available:true, gpu_on:!!st.convert_gpu, vendor:"nvenc", label:"NVIDIA NVENC", h264:"h264_nvenc", webm:"av1_nvenc", gpu_name:"NVIDIA GeForce RTX 5080"}),
     pick_convert_files: async()=>CONV_MOCKS[convBatch++ % CONV_MOCKS.length],
     start_convert: async(items, opts={})=>{
       const ids = [];
@@ -1967,6 +2148,7 @@ function makeDemoApi(){
         const id = "cv" + nextId++, fmt = (opts.fmt||"mp4").toUpperCase();
         const mode = CONV_OUT.image.includes(opts.fmt) ? "image" : ["mp3","m4a","wav","flac","ogg","opus"].includes(opts.fmt) ? "audio" : "video";
         const j = {id, kind:"convert", mode, title:it.name, site:"File", status:"queued", percent:0, quality:fmt,
+          hw: opts.use_gpu && mode==="video" ? "GPU" : "",
           folder: opts.dest_mode==="downloads" ? st.folder : it.folder, file:`${it.name.replace(/\.[^.]+$/,"")}.${opts.fmt}`};
         ids.push(id);
         runDemoJob(j, [{status:"converting",percent:32,eta:4},{status:"converting",percent:76,eta:1}], () => {
@@ -1991,7 +2173,9 @@ function makeDemoApi(){
             {start:8, end:15, speaker: diarOn ? "Interlocutore 2" : "", text:"I timestamp e gli interlocutori vengono generati offline su questo PC."},
           ]
         };
-        const j = {id, kind:"transcribe", mode:"text", title:name, site:"File", status:"queued", percent:0, quality:"Testo", file:key, folder:p.replace(/[^\\/]+$/,"")};
+        const j = {id, kind:"transcribe", mode:"text", title:name, site:"File", status:"queued", percent:0, quality:"Testo",
+          hw: (demoW.gpu_on || (diarOn && demoW.diar_gpu_on)) ? "GPU" : "",
+          file:key, folder:p.replace(/[^\\/]+$/,"")};
         ids.push(id);
         const steps = diarOn
           ? [{status:"transcribing",percent:40,eta:4},{status:"transcribing",percent:88,eta:1},{status:"diarizing",percent:55,eta:2}]
@@ -2018,8 +2202,8 @@ function makeDemoApi(){
     cancel: async()=>1, retry: async()=>1,
     clear_finished: async()=>1, clear_history: async()=>{ hist=[]; return 1; },
     open_file: async()=>true, open_folder: async()=>true, paste: async()=>"", choose_folder: async()=>null, update_ytdlp: async()=>({ok:true,message:"yt-dlp è aggiornato"}),
-    app_info: async()=>({version:"1.3.0", repo:"https://github.com/nonsonoAxel/AxTools"}),
-    check_update: async()=>({ok:true, update:false, current:"1.3.0", latest:"1.3.0", page:"https://github.com/nonsonoAxel/AxTools/releases/latest"}),
+    app_info: async()=>({version:"1.4.0", repo:"https://github.com/nonsonoAxel/AxTools"}),
+    check_update: async()=>({ok:true, update:false, current:"1.4.0", latest:"1.4.0", page:"https://github.com/nonsonoAxel/AxTools/releases/latest"}),
     open_url: async()=>1,
     open_log: async()=>1, data_info: async()=>({path:"C:\\Users\\Andrea\\AppData\\Local\\AxTools", size:720e6, exe:"C:\\Users\\Andrea\\Desktop\\AxTools.exe"}), open_data_folder: async()=>1, uninstall: async()=>1,
     win_drag: async()=>0, win_resize: async()=>0, win_minimize: async()=>0, win_close: async()=>0, win_toggle_max: async()=>(maxed=!maxed),
@@ -2039,7 +2223,17 @@ function makeDemoApi(){
       }
       demoW.diar_on=on; st.whisper_diarize=on; return {ok:true,...demoW};
     },
-    whisper_diarize_delete: async()=>{ demoW.diar_installed=false; demoW.diar_on=false; demoW.diar_disk=0; st.whisper_diarize=false; return {ok:true,...demoW}; },
+    whisper_diarize_gpu: async on=>{
+      if(on && !demoW.diar_gpu_installed){
+        for(let d=0; d<=10; d++){ await new Promise(r=>setTimeout(r,80)); window.onBackend("model",{label:"GPU interlocutori",done:d*98.8e6,total:988321303}); }
+        demoW.diar_gpu_installed=true; demoW.diar_gpu_disk=1290000000;
+      }
+      demoW.diar_gpu_on=on; st.whisper_diarize_gpu=on;
+      if(on){ demoW.diar_installed=true; demoW.diar_on=true; st.whisper_diarize=true; }
+      return {ok:true,...demoW};
+    },
+    whisper_diarize_gpu_delete: async()=>{ demoW.diar_gpu_installed=false; demoW.diar_gpu_on=false; demoW.diar_gpu_disk=0; st.whisper_diarize_gpu=false; return {ok:true,...demoW}; },
+    whisper_diarize_delete: async()=>{ demoW.diar_installed=false; demoW.diar_on=false; demoW.diar_disk=0; st.whisper_diarize=false; demoW.diar_gpu_installed=false; demoW.diar_gpu_on=false; demoW.diar_gpu_disk=0; st.whisper_diarize_gpu=false; return {ok:true,...demoW}; },
   };
 }
 </script>

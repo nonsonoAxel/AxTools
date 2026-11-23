@@ -69,12 +69,109 @@ def parse_ffmpeg_time_us(line: str) -> float | None:
     return val / 1_000_000.0 if val >= 0 else None
 
 
+def _probe_encoder(ffmpeg_exe: str, enc: str) -> bool:
+    """Verifica con un micro-frame fittizio se l'encoder hardware è utilizzabile su questo PC."""
+    pix_fmt = "nv12" if enc.endswith("_qsv") else "yuv420p"
+    cmd = [
+        ffmpeg_exe, "-hide_banner", "-v", "error",
+        "-f", "lavfi", "-i", "color=c=black:s=256x256:d=0.04:r=25",
+        "-frames:v", "1", "-pix_fmt", pix_fmt,
+        "-c:v", enc, "-f", "null", "-",
+    ]
+    try:
+        return subprocess.run(cmd, capture_output=True, creationflags=_NO_WINDOW, timeout=6).returncode == 0
+    except Exception:
+        return False
+
+
+def probe_gpu_encoders(ffmpeg_exe: str | None, nvidia_hint: bool = False) -> dict:
+    """Rileva il primo backend video hardware funzionante (NVENC, AMF o QSV)."""
+    empty = {"vendor": None, "label": "", "h264": None, "webm": None}
+    if not ffmpeg_exe or not Path(ffmpeg_exe).is_file():
+        return empty
+    order = ("nvenc", "amf", "qsv") if nvidia_hint else ("amf", "qsv", "nvenc")
+    table = {
+        "nvenc": ("NVIDIA NVENC", "h264_nvenc", ("av1_nvenc",)),
+        "amf": ("AMD AMF", "h264_amf", ("av1_amf",)),
+        "qsv": ("Intel QSV", "h264_qsv", ("av1_qsv", "vp9_qsv")),
+    }
+    for vendor in order:
+        label, h264, webm_cands = table[vendor]
+        if _probe_encoder(ffmpeg_exe, h264):
+            webm = next((w for w in webm_cands if _probe_encoder(ffmpeg_exe, w)), None)
+            return {"vendor": vendor, "label": label, "h264": h264, "webm": webm}
+    return empty
+
+
+def gpu_encoder_for(fmt: str, gpu_info: dict | None) -> str | None:
+    """Restituisce il nome dell'encoder ffmpeg GPU adatto al formato di uscita, o None."""
+    fmt = (fmt or "").lower().lstrip(".")
+    if not isinstance(gpu_info, dict):
+        return None
+    if fmt in ("mp4", "mkv", "mov"):
+        return gpu_info.get("h264") or None
+    if fmt == "webm":
+        return gpu_info.get("webm") or None
+    return None
+
+
+def _gpu_video_args(gpu_enc: str, fmt: str, preset: str, video_kbps: int | None,
+                    audio_kbps: int | None) -> list[str] | None:
+    """Costruisce gli argomenti video+audio per GPU (NVENC/AMF/QSV) o None se encoder sconosciuto."""
+    even_vf = ["-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2"]
+    ab = f"{audio_kbps}k" if preset == "compact10" else ("192k" if preset == "high" else "128k")
+    a_args = ["-c:a", "libopus" if fmt == "webm" else "aac", "-b:a", ab]
+
+    if gpu_enc in ("h264_nvenc", "av1_nvenc"):
+        is_av1 = gpu_enc == "av1_nvenc"
+        if preset == "compact10":
+            v = ["-c:v", gpu_enc, "-preset", "p5", "-rc", "vbr", "-b:v", f"{video_kbps}k",
+                 "-maxrate", f"{int(video_kbps * 1.25)}k", "-bufsize", f"{video_kbps * 2}k",
+                 *even_vf, "-pix_fmt", "yuv420p"]
+        elif preset == "high":
+            v = ["-c:v", gpu_enc, "-preset", "p5", "-tune", "hq", "-rc", "vbr",
+                 "-cq", "24" if is_av1 else "19", "-b:v", "0", *even_vf, "-pix_fmt", "yuv420p"]
+        else:
+            v = ["-c:v", gpu_enc, "-preset", "p4", "-rc", "vbr",
+                 "-cq", "30" if is_av1 else "24", "-b:v", "0", *even_vf, "-pix_fmt", "yuv420p"]
+    elif gpu_enc in ("h264_amf", "av1_amf"):
+        is_av1 = gpu_enc == "av1_amf"
+        if preset == "compact10":
+            v = ["-c:v", gpu_enc, "-quality", "balanced", "-rc", "vbr_peak", "-b:v", f"{video_kbps}k",
+                 "-maxrate", f"{int(video_kbps * 1.25)}k", "-bufsize", f"{video_kbps * 2}k",
+                 *even_vf, "-pix_fmt", "yuv420p"]
+        else:
+            qp = ("24" if is_av1 else "19") if preset == "high" else ("30" if is_av1 else "24")
+            v = ["-c:v", gpu_enc, "-quality", "quality" if preset == "high" else "balanced",
+                 "-rc", "cqp", "-qp_i", qp, "-qp_p", qp, *even_vf, "-pix_fmt", "yuv420p"]
+    elif gpu_enc in ("h264_qsv", "av1_qsv", "vp9_qsv"):
+        is_webm_qsv = gpu_enc in ("av1_qsv", "vp9_qsv")
+        if preset == "compact10":
+            v = ["-c:v", gpu_enc, "-preset", "medium", "-b:v", f"{video_kbps}k",
+                 "-maxrate", f"{int(video_kbps * 1.25)}k", "-bufsize", f"{video_kbps * 2}k",
+                 *even_vf, "-pix_fmt", "nv12"]
+        else:
+            gq = ("24" if is_webm_qsv else "20") if preset == "high" else ("30" if is_webm_qsv else "25")
+            v = ["-c:v", gpu_enc, "-preset", "medium", "-global_quality", gq, *even_vf, "-pix_fmt", "nv12"]
+    else:
+        return None
+
+    out = v + a_args
+    if fmt in ("mp4", "mov"):
+        out += ["-movflags", "+faststart"]
+    return out
+
+
 def build_ffmpeg_cmd(ffmpeg_exe: str, src: Path, dst: Path, kind: str, fmt: str,
-                     opts: dict | None = None, duration: float | None = None) -> list[str]:
+                     opts: dict | None = None, duration: float | None = None,
+                     gpu_enc: str | None = None, hwaccel: bool = False) -> list[str]:
     """Costruisce il comando ffmpeg con reporting progress su stdout."""
     opts = opts or {}
     fmt = fmt.lower().lstrip(".")
-    cmd = [ffmpeg_exe, "-nostdin", "-y", "-v", "error", "-progress", "pipe:1", "-nostats", "-i", str(src)]
+    cmd = [ffmpeg_exe, "-nostdin", "-y", "-v", "error", "-progress", "pipe:1", "-nostats"]
+    if hwaccel and kind == "video" and fmt not in AUDIO_OUT:
+        cmd += ["-hwaccel", "auto"]
+    cmd += ["-i", str(src)]
 
     if fmt in AUDIO_OUT:
         kbps = opts.get("audio_kbps", 192)
@@ -104,10 +201,16 @@ def build_ffmpeg_cmd(ffmpeg_exe: str, src: Path, dst: Path, kind: str, fmt: str,
         preset = opts.get("video_preset") or "balanced"
         if preset not in ("high", "balanced", "compact10"):
             preset = "balanced"
+        audio_kbps = None
+        video_kbps = None
         if preset == "compact10":
             dur = max(float(duration or 30.0), 1.0)
             audio_kbps = 64 if dur > 120 else 96
             video_kbps = max(150, int((9.4 * 8192 / dur) - audio_kbps))
+        gpu_args = _gpu_video_args(gpu_enc, fmt, preset, video_kbps, audio_kbps) if gpu_enc else None
+        if gpu_args is not None:
+            cmd += gpu_args
+        elif preset == "compact10":
             if fmt == "webm":
                 cmd += ["-c:v", "libvpx-vp9", "-b:v", f"{video_kbps}k",
                         "-maxrate", f"{int(video_kbps * 1.25)}k", "-bufsize", f"{video_kbps * 2}k",
