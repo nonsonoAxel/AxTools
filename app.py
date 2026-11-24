@@ -5,6 +5,7 @@ Creato da nonsonoAxel · https://github.com/nonsonoAxel/AxTools
 Avvio in sviluppo:  python app.py      Build:  crea-exe.bat
 """
 import base64
+import concurrent.futures
 import ctypes
 import ctypes.wintypes as wt
 import hashlib
@@ -33,7 +34,7 @@ import firma
 import trascrizione
 
 APP_NAME = "AxTools"
-APP_VERSION = "1.4.0"           # da aumentare a ogni nuova release su GitHub (es. 1.0.1, 1.1.0)
+APP_VERSION = "1.5.0"           # da aumentare a ogni nuova release su GitHub (es. 1.0.1, 1.1.0)
 GITHUB_REPO = "nonsonoAxel/AxTools"
 RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
@@ -57,6 +58,7 @@ BIN_DIR = DATA_DIR / "bin"
 SETTINGS_FILE = DATA_DIR / "settings.json"
 HISTORY_FILE = DATA_DIR / "history.json"
 CACHE_DIR = DATA_DIR / "cache"
+PROBE_CACHE_FILE = DATA_DIR / "probe-cache.json"
 
 # yt-dlp "a cartella": non deve estrarsi in una cartella temporanea a ogni avvio (analisi più rapida)
 YTDLP_URL = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_win.zip"
@@ -247,7 +249,7 @@ def _fmt_clip_sec(sec: float) -> str:
     return txt or "0"
 
 
-def build_clip_args(clip_start, clip_end, fast_cut=False) -> list[str]:
+def build_clip_args(clip_start, clip_end, fast_cut=False, gpu_enc=None) -> list[str]:
     """Argomenti yt-dlp per ritagliare un intervallo temporale (Da - A)."""
     s = parse_timecode(clip_start)
     e = parse_timecode(clip_end)
@@ -259,6 +261,8 @@ def build_clip_args(clip_start, clip_end, fast_cut=False) -> list[str]:
     args = ["--download-sections", spec]
     if not fast_cut:
         args.append("--force-keyframes-at-cuts")
+        if gpu_enc:
+            args.extend(convertitore.clip_gpu_downloader_args(gpu_enc))
     return args
 
 
@@ -428,6 +432,9 @@ class Api:
         self._info_cache = {}
         self._sysinfo = None
         self._conv_gpu = None
+        self._probe_lock = threading.RLock()
+        pc = load_json(PROBE_CACHE_FILE, {})
+        self._probe_cache = pc if isinstance(pc, dict) else {}
         self._active_view = "download"
         self._dnd_bound = False
         self._cookie_reads = set()      # file temporanei in cui yt-dlp sta leggendo dal browser
@@ -447,6 +454,32 @@ class Api:
         self._lock = threading.Lock()
         self._slots = threading.Semaphore(self.settings["parallel"])
         self._expire_cookies()
+
+    @staticmethod
+    def _file_sig(path: Path) -> str:
+        """Firma leggera (dimensione + mtime_ns) per invalidare la cache quando cambia un binario."""
+        try:
+            if not path.is_file():
+                return ""
+            st = path.stat()
+            return f"{st.st_size}:{st.st_mtime_ns}"
+        except OSError:
+            return ""
+
+    def _job_track_proc(self, job, proc):
+        with self._lock:
+            ps = job.get("procs")
+            if isinstance(ps, set):
+                ps.add(proc)
+            job["proc"] = proc
+
+    def _job_untrack_proc(self, job, proc):
+        with self._lock:
+            ps = job.get("procs")
+            if isinstance(ps, set):
+                ps.discard(proc)
+            if job.get("proc") is proc:
+                job["proc"] = next(iter(ps), None) if ps else None
 
     # ---------- utilità ----------
     def _emit(self, event: str, payload):
@@ -476,15 +509,25 @@ class Api:
     def _shutdown(self):
         """Alla chiusura della finestra: nessun yt-dlp deve restare attivo in background (alla
         fine scriverebbe un file di cookie che nessuno cancella più)."""
-        for j in list(self._jobs.values()):
-            j["cancel"] = True
-        procs = list(self._procs) + [j.get("proc") for j in list(self._jobs.values())]
+        with self._lock:
+            jobs = list(self._jobs.values())
+            procs = list(self._procs)
+            for j in jobs:
+                j["cancel"] = True
+                if j.get("proc"):
+                    procs.append(j["proc"])
+                procs.extend(j.get("procs") or ())
+        seen = set()
+        uniq = []
         for proc in procs:
+            if proc and id(proc) not in seen:
+                seen.add(id(proc))
+                uniq.append(proc)
+        for proc in uniq:
             self._kill(proc)
-        for proc in procs:
+        for proc in uniq:
             try:
-                if proc:
-                    proc.wait(timeout=3)
+                proc.wait(timeout=3)
             except Exception:
                 pass
         unlink_quiet(*CACHE_DIR.glob("ck-*.txt"))
@@ -523,11 +566,14 @@ class Api:
             raise ValueError(f"{label}: percorso non valido nell'archivio ({name})")
         return relp
 
-    def _download_file(self, url, dest: Path, label, event="setup", progress_offset=0, progress_total=None):
+    def _download_file(self, url, dest: Path, label, event="setup", progress_offset=0, progress_total=None,
+                       on_progress=None):
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        h = hashlib.sha256()
         with urllib.request.urlopen(req, timeout=60) as r:
             total = int(r.headers.get("Content-Length") or 0)
             done = 0
+            last_emit = 0.0
             tmp = dest.with_suffix(dest.suffix + ".part")
             with open(tmp, "wb") as f:
                 while True:
@@ -535,10 +581,46 @@ class Api:
                     if not chunk:
                         break
                     f.write(chunk)
+                    h.update(chunk)
                     done += len(chunk)
-                    self._emit(event, {"label": label, "done": progress_offset + done,
-                                       "total": progress_total or total})
+                    now = time.time()
+                    if now - last_emit >= 0.15:
+                        last_emit = now
+                        if on_progress:
+                            on_progress(done, total)
+                        else:
+                            self._emit(event, {"label": label, "done": progress_offset + done,
+                                               "total": progress_total or total})
+            if on_progress:
+                on_progress(done, total or done)
+            else:
+                self._emit(event, {"label": label, "done": progress_offset + done,
+                                   "total": progress_total or total or done})
             tmp.replace(dest)
+        return done, h.hexdigest()
+
+    def _make_progress_agg(self, event, label, total_hint=0):
+        """Aggrega l'avanzamento di più download paralleli in un solo evento UI throttled."""
+        lock = threading.Lock()
+        state = {"last": 0.0, "parts": {}}
+
+        def tracker(key, est_size=0):
+            with lock:
+                state["parts"][key] = [0, est_size]
+
+            def on_prog(done, total):
+                with lock:
+                    prev_tot = state["parts"][key][1]
+                    state["parts"][key] = [done, total or prev_tot]
+                    now = time.time()
+                    sum_done = sum(v[0] for v in state["parts"].values())
+                    sum_tot = max(total_hint, sum(v[1] or v[0] for v in state["parts"].values()))
+                    if done < (total or 0) and now - state["last"] < 0.15:
+                        return
+                    state["last"] = now
+                    self._emit(event, {"label": label, "done": sum_done, "total": sum_tot or 1})
+            return on_prog
+        return tracker
 
     # ---------- dipendenze ----------
     def check_deps(self):
@@ -547,17 +629,19 @@ class Api:
         log.info("check_deps: %s", have)
         return {"ytdlp": have["yt-dlp"], "ffmpeg": have["ffmpeg"], "deno": have["deno"]}
 
-    def _install_zip(self, url, label, dest: Path, keep, sums_url=None, expected_sha=None, event="setup"):
+    def _install_zip(self, url, label, dest: Path, keep, sums_url=None, expected_sha=None, event="setup",
+                     on_progress=None):
         """Scarica uno zip ed estrae in dest i file per cui keep(percorso_nello_zip) restituisce
         il percorso relativo di destinazione (o None per scartarlo). Sostituisce dest solo a fine lavoro.
         Se sums_url è indicato, lo zip deve corrispondere all'impronta SHA-256 pubblicata lì."""
         zpath = BIN_DIR / f"{dest.name}.zip"
-        self._download_file(url, zpath, label, event=event)
+        _, got_sha = self._download_file(url, zpath, label, event=event, on_progress=on_progress)
         expected = expected_sha or (self._expected_sha256(sums_url, url.rsplit("/", 1)[-1]) if sums_url else None)
-        if expected and trascrizione.sha256_file(zpath) != expected.lower():
+        if expected and got_sha != expected.lower():
             zpath.unlink(missing_ok=True)
             raise ValueError(f"{label}: il file scaricato è rovinato o non è quello pubblicato. Riprova.")
-        self._emit(event, {"label": f"Estrazione {label}", "done": 1, "total": 1})
+        if on_progress is None:
+            self._emit(event, {"label": f"Estrazione {label}", "done": 1, "total": 1})
         tmp = dest.with_name(dest.name + ".new")
         shutil.rmtree(tmp, ignore_errors=True)
         with zipfile.ZipFile(zpath) as z:
@@ -602,17 +686,40 @@ class Api:
     def install_deps(self):
         try:
             t0 = time.time()
-            if not OWN_EXE["yt-dlp"].exists():
-                self._install_zip(YTDLP_URL, "yt-dlp", YTDLP_DIR, self._keep_ytdlp, YTDLP_SUMS)
-            if not OWN_EXE["ffmpeg"].exists():
-                self._install_zip(FFMPEG_URL, "ffmpeg", FFMPEG_DIR, self._keep_ffmpeg, FFMPEG_SUMS)
-                self._conv_gpu = None
-            if not OWN_EXE["deno"].exists():
-                self._install_zip(DENO_URL, "Deno", BIN_DIR / "deno-dir",
-                                  lambda n: "deno.exe" if n.replace("\\", "/").split("/")[-1] == "deno.exe" else None,
-                                  DENO_SUMS)
-                os.replace(BIN_DIR / "deno-dir" / "deno.exe", OWN_EXE["deno"])
-                shutil.rmtree(BIN_DIR / "deno-dir", ignore_errors=True)
+            missing = [k for k in ("yt-dlp", "ffmpeg", "deno") if not OWN_EXE[k].exists()]
+            if missing:
+                def _do_ytdlp(prog=None):
+                    self._install_zip(YTDLP_URL, "yt-dlp", YTDLP_DIR, self._keep_ytdlp, YTDLP_SUMS,
+                                      on_progress=prog)
+
+                def _do_ffmpeg(prog=None):
+                    self._install_zip(FFMPEG_URL, "ffmpeg", FFMPEG_DIR, self._keep_ffmpeg, FFMPEG_SUMS,
+                                      on_progress=prog)
+                    with self._probe_lock:
+                        self._conv_gpu = None
+                        self._probe_cache.pop("conv_gpu_sig", None)
+                        self._probe_cache.pop("conv_gpu", None)
+                        save_json(PROBE_CACHE_FILE, self._probe_cache)
+
+                def _do_deno(prog=None):
+                    self._install_zip(
+                        DENO_URL, "Deno", BIN_DIR / "deno-dir",
+                        lambda n: "deno.exe" if n.replace("\\", "/").split("/")[-1] == "deno.exe" else None,
+                        DENO_SUMS, on_progress=prog,
+                    )
+                    os.replace(BIN_DIR / "deno-dir" / "deno.exe", OWN_EXE["deno"])
+                    shutil.rmtree(BIN_DIR / "deno-dir", ignore_errors=True)
+
+                runners = {"yt-dlp": _do_ytdlp, "ffmpeg": _do_ffmpeg, "deno": _do_deno}
+                if len(missing) == 1:
+                    runners[missing[0]](None)
+                else:
+                    agg = self._make_progress_agg("setup", "Download componenti")
+                    tasks = [(runners[k], agg(k)) for k in missing]
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=len(tasks)) as ex:
+                        futs = [ex.submit(fn, prog) for fn, prog in tasks]
+                        for fut in futs:
+                            fut.result()
             log.info("install_deps completato in %.1fs, componenti: %.0f MB",
                      time.time() - t0, dir_size(BIN_DIR) / 2**20)
             return {"ok": True, **self.check_deps()}
@@ -637,14 +744,25 @@ class Api:
             return {"ok": False, "error": str(e)}
 
     def version(self):
+        exe_p = OWN_EXE["yt-dlp"]
         exe = self._exe("yt-dlp")
         if not exe:
             return ""
-        try:
-            return subprocess.run([exe, "--version"], capture_output=True, text=True,
-                                  creationflags=NO_WINDOW, timeout=30).stdout.strip()
-        except Exception:
-            return ""
+        with self._probe_lock:
+            sig = self._file_sig(exe_p)
+            cached = self._probe_cache.get("ytdlp_ver")
+            if sig and self._probe_cache.get("ytdlp_sig") == sig and isinstance(cached, str) and cached:
+                return cached
+            try:
+                ver = subprocess.run([exe, "--version"], capture_output=True, text=True,
+                                     creationflags=NO_WINDOW, timeout=30).stdout.strip()
+            except Exception:
+                return ""
+            if ver and sig:
+                self._probe_cache["ytdlp_sig"] = sig
+                self._probe_cache["ytdlp_ver"] = ver
+                save_json(PROBE_CACHE_FILE, self._probe_cache)
+            return ver
 
     # ---------- impostazioni ----------
     def get_settings(self):
@@ -1068,6 +1186,13 @@ class Api:
             return None
         cs = parse_timecode(clip_start)
         ce = parse_timecode(clip_end)
+        raw_dur = info.get("duration")
+        info_dur = float(raw_dur) if isinstance(raw_dur, (int, float)) and raw_dur > 0 else None
+        if has_clip:
+            end_eff = ce if ce is not None else (info_dur if info_dur and info_dur > (cs or 0.0) else None)
+            clip_dur = (end_eff - (cs or 0.0)) if end_eff is not None and end_eff > (cs or 0.0) else None
+        else:
+            clip_dur = None
         clip_lbl = (f"{trascrizione.format_timestamp(cs or 0)}–"
                     f"{trascrizione.format_timestamp(ce) if ce is not None else 'fine'}") if has_clip else ""
         kind = "transcribe" if raw_ov.get("from_transcribe") else "download"
@@ -1085,14 +1210,15 @@ class Api:
                     ("Max" if opts["quality"] == "best" else opts["quality"] + "p"),
             clip=clip_lbl, clip_start=clip_start if has_clip else None,
             clip_end=clip_end if has_clip else None, clip_fast=clip_fast if has_clip else False,
+            clip_dur=clip_dur, duration=info_dur,
             tr_opts=tr_opts, dl_overrides=clean_settings(raw_ov), folder=opts["folder"])
         threading.Thread(target=self._run_job, args=(job, opts), daemon=True).start()
         return job["id"]
 
     def _new_job(self, **fields):
         job = {"id": uuid.uuid4().hex[:10], "url": "", "kind": "download", "status": "queued", "percent": 0,
-               "thumbnail": None, "file": None, "proc": None, "cancel": False, "item": "", "speed": None,
-               "eta": None, **fields}
+               "thumbnail": None, "file": None, "proc": None, "procs": set(), "cancel": False, "item": "",
+               "speed": None, "eta": None, **fields}
         with self._lock:
             self._jobs[job["id"]] = job
         self._emit("job", self._public(job))
@@ -1109,20 +1235,32 @@ class Api:
                 log.exception("cronologia non salvata")
         else:
             job.update(status="error", error=err)
-        job["proc"] = None
+        with self._lock:
+            job["proc"] = None
+            if isinstance(job.get("procs"), set):
+                job["procs"].clear()
         self._emit("job", self._public(job))
 
     def _public(self, job):
-        return {k: v for k, v in job.items() if k not in ("proc", "conv_opts", "tr_opts", "dl_overrides")}
+        return {k: v for k, v in job.items()
+                if k not in ("proc", "procs", "conv_opts", "tr_opts", "dl_overrides", "clip_dur", "duration")}
 
     def _run_job(self, job, opts):
         with self._slots:
             if job["cancel"]:
                 return
             text_dir = None
+            cached = None
             try:
                 Path(opts["folder"]).mkdir(parents=True, exist_ok=True)
-                clip_args = build_clip_args(job.get("clip_start"), job.get("clip_end"), job.get("clip_fast"))
+                clip_fast = bool(job.get("clip_fast"))
+                base_clip = build_clip_args(job.get("clip_start"), job.get("clip_end"), clip_fast)
+                want_gpu = bool(base_clip) and not clip_fast and opts["mode"] == "video" and \
+                    bool(opts.get("convert_gpu", self.settings.get("convert_gpu", True)))
+                clip_gpu_enc = (self._conv_gpu_info().get("h264") or None) if want_gpu else None
+                clip_args = build_clip_args(job.get("clip_start"), job.get("clip_end"), clip_fast,
+                                            gpu_enc=clip_gpu_enc)
+                job["hw"] = "GPU" if clip_gpu_enc else ""
                 if opts["mode"] == "text":
                     model = self._whisper_model_path()
                     if not model:
@@ -1130,21 +1268,35 @@ class Api:
                     # l'audio va in una cartella temporanea: nella cartella dei download finisce solo il testo
                     text_dir = CACHE_DIR / f"tr-{job['id']}"
                     opts = {**opts, "playlist": False, "final_folder": opts["folder"], "folder": str(text_dir)}
-                # primo tentativo: l'analisi già fatta (se non c'è ritaglio temporale), poi il piano dei cookie
-                cached = None if clip_args else self._take_cache(job["url"])
+                # primo tentativo: l'analisi già fatta, poi il piano dei cookie
+                cached = self._take_cache(job["url"])
                 t0 = time.time()
+                use_clip_args = clip_args
 
                 def run(cookies, info_file):
-                    job["percent"], ta = 0, time.time()
-                    code, err = self._run_proc(job, opts, cookies, info_file, clip_args)
-                    log.info("download (cookie=%s, analisi salvata=%s): codice %s, %.1fs%s", cookies,
-                             bool(info_file), code, time.time() - ta,
+                    job["percent"], job["eta"], job["file"], ta = 0, None, None, time.time()
+                    code, err = self._run_proc(job, opts, cookies, info_file, use_clip_args)
+                    clip_tag = f", clip={clip_gpu_enc}" if (use_clip_args and clip_gpu_enc and job.get("hw")) \
+                        else (", clip=cpu" if use_clip_args else "")
+                    log.info("download (cookie=%s, analisi salvata=%s%s): codice %s, %.1fs%s", cookies,
+                             bool(info_file), clip_tag, code, time.time() - ta,
                              "" if code == 0 else " | " + log_safe(err.replace(job["url"], "")))
                     return code == 0, err or f"yt-dlp ha restituito codice {code}"
 
                 ok, err, _, tried = self._attempts(
                     job["url"], run, first=(cached[1], cached[0]) if cached else None,
                     cancelled=lambda: job["cancel"], on_warning=lambda w: job.update(warning=w))
+                why = (err or "").replace(job["url"], "")
+                if not ok and not job["cancel"] and clip_gpu_enc and not is_auth_error(why) and not is_cookie_error(why):
+                    log.warning("ritaglio GPU (%s) non riuscito, riprovo su CPU: %s", clip_gpu_enc, log_safe(why))
+                    use_clip_args = base_clip
+                    job["hw"] = ""
+                    job["warning"] = "Ritaglio su GPU non riuscito per questo video: riprovo sul processore."
+                    self._emit("job", self._public(job))
+                    ok, err, _, tried = self._attempts(
+                        job["url"], run,
+                        first=(cached[1], cached[0]) if (cached and cached[0].exists()) else None,
+                        cancelled=lambda: job["cancel"], on_warning=lambda w: job.update(warning=w))
                 if ok and job.get("file") and os.path.exists(job["file"]):
                     mb = os.path.getsize(job["file"]) / 2**20
                     secs = time.time() - t0
@@ -1179,7 +1331,7 @@ class Api:
 
     def _collect_convert_files(self, paths):
         ffprobe = str(FFPROBE_EXE) if FFPROBE_EXE.exists() else None
-        out, skipped = [], 0
+        valid, skipped = [], 0
         for raw in paths:
             if not isinstance(raw, str) or not raw:
                 skipped += 1
@@ -1190,16 +1342,26 @@ class Api:
                 skipped += 1
                 continue
             self._picked_files.add(str(p))
+            valid.append((p, kind))
+
+        def _probe_one(item):
+            p, kind = item
             meta = convertitore.probe_media(ffprobe, p)
             try:
                 size = p.stat().st_size
             except OSError:
                 size = 0
-            out.append({
+            return {
                 "path": str(p), "name": p.name, "folder": str(p.parent),
                 "kind": kind, "ext": p.suffix.lstrip(".").lower(),
                 "size": size, "duration": meta["duration"], "dims": meta["dims"],
-            })
+            }
+
+        if len(valid) > 1:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, len(valid))) as ex:
+                out = list(ex.map(_probe_one, valid))
+        else:
+            out = [_probe_one(v) for v in valid]
         return out, skipped
 
     def pick_convert_files(self):
@@ -1219,15 +1381,27 @@ class Api:
 
     def _conv_gpu_info(self):
         """Rileva una volta l'encoder GPU disponibile per ffmpeg (NVENC/AMF/QSV)."""
-        if self._conv_gpu is not None:
-            return self._conv_gpu
-        ff = self._exe("ffmpeg")
-        if not ff:
-            return {"vendor": None, "label": "", "h264": None, "webm": None}
-        info = convertitore.probe_gpu_encoders(ff, nvidia_hint=self._system()["nvidia"])
-        self._conv_gpu = info
-        log.info("encoder GPU conversione: %s", info)
-        return info
+        with self._probe_lock:
+            if self._conv_gpu is not None:
+                return self._conv_gpu
+            ff = self._exe("ffmpeg")
+            if not ff:
+                return {"vendor": None, "label": "", "h264": None, "webm": None}
+            sig = f"{self._file_sig(OWN_EXE['ffmpeg'])}|{self._system().get('driver_version', '')}"
+            cached = self._probe_cache.get("conv_gpu")
+            if (sig and self._probe_cache.get("conv_gpu_sig") == sig
+                    and isinstance(cached, dict)
+                    and all(k in cached for k in ("vendor", "label", "h264", "webm"))):
+                info = {k: cached.get(k) for k in ("vendor", "label", "h264", "webm")}
+                self._conv_gpu = info
+                return info
+            info = convertitore.probe_gpu_encoders(ff, nvidia_hint=self._system()["nvidia"])
+            self._conv_gpu = info
+            self._probe_cache["conv_gpu_sig"] = sig
+            self._probe_cache["conv_gpu"] = info
+            save_json(PROBE_CACHE_FILE, self._probe_cache)
+            log.info("encoder GPU conversione: %s", info)
+            return info
 
     def convert_info(self):
         """Stato accelerazione GPU per la scheda Converti e le Impostazioni."""
@@ -1250,11 +1424,38 @@ class Api:
         fmt = str(opts.get("fmt") or "").lower().lstrip(".")
         dest_mode = "downloads" if opts.get("dest_mode") == "downloads" else "same"
         use_gpu = opts.get("use_gpu") if isinstance(opts.get("use_gpu"), bool) else bool(self.settings.get("convert_gpu", True))
+        raw_vq = opts.get("video_quality")
+        try:
+            video_quality = (max(10, min(100, int(round(float(raw_vq)))))
+                             if raw_vq is not None and raw_vq != "" else None)
+        except (TypeError, ValueError):
+            video_quality = None
+        try:
+            v_mb = float(opts.get("video_max_mb") or 0.0)
+            video_max_mb = max(0.5, min(10000.0, v_mb)) if v_mb > 0 else 0.0
+        except (TypeError, ValueError):
+            video_max_mb = 0.0
+        raw_iq = opts.get("image_quality")
+        if raw_iq in (None, "", "original"):
+            image_quality = "original"
+        else:
+            try:
+                image_quality = max(10, min(100, int(round(float(raw_iq)))))
+            except (TypeError, ValueError):
+                image_quality = "original"
+        try:
+            i_mb = float(opts.get("image_max_mb") or 0.0)
+            image_max_mb = max(0.05, min(500.0, i_mb)) if i_mb > 0 else 0.0
+        except (TypeError, ValueError):
+            image_max_mb = 0.0
         clean_opts = {
             "fmt": fmt,
             "video_preset": str(opts.get("video_preset") or "balanced"),
+            "video_quality": video_quality,
+            "video_max_mb": video_max_mb,
             "audio_kbps": int(opts.get("audio_kbps") or 192) if str(opts.get("audio_kbps") or "").isdigit() else 192,
-            "image_quality": int(opts.get("image_quality") or 85) if str(opts.get("image_quality") or "").isdigit() else 85,
+            "image_quality": image_quality,
+            "image_max_mb": image_max_mb,
             "image_max_side": int(opts.get("image_max_side") or 0) if str(opts.get("image_max_side") or "").isdigit() else 0,
             "dest_mode": dest_mode,
             "use_gpu": use_gpu,
@@ -1269,7 +1470,8 @@ class Api:
             if not kind or not src.is_file() or fmt not in convertitore.allowed_outputs(kind):
                 continue
             dur = entry.get("duration") if isinstance(entry, dict) else None
-            ids.append(self._start_convert_one(src, {**clean_opts, "duration": dur}))
+            dims = entry.get("dims") if isinstance(entry, dict) else None
+            ids.append(self._start_convert_one(src, {**clean_opts, "duration": dur, "dims": dims}))
         return ids
 
     def _start_convert_one(self, src: Path, opts: dict):
@@ -1290,23 +1492,26 @@ class Api:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 text=True, encoding="utf-8", errors="replace",
                                 creationflags=NO_WINDOW, bufsize=1)
-        job["proc"] = proc
-        for line in proc.stdout:
-            line = line.rstrip()
-            t_sec = convertitore.parse_ffmpeg_time_us(line)
-            if t_sec is not None and dur and dur > 0:
-                pct = min(99.0, max(0.0, t_sec / dur * 100.0))
-                job["percent"] = pct
-                elapsed = time.time() - t0
-                if pct > 1.5 and elapsed > 0.2:
-                    job["eta"] = elapsed * (100.0 - pct) / pct
-                now = time.time()
-                if now - last_emit > 0.25:
-                    last_emit = now
-                    self._emit("job", self._public(job))
-            elif line and "=" not in line:
-                tail = (tail + [line])[-5:]
-        proc.wait()
+        self._job_track_proc(job, proc)
+        try:
+            for line in proc.stdout:
+                line = line.rstrip()
+                t_sec = convertitore.parse_ffmpeg_time_us(line)
+                if t_sec is not None and dur and dur > 0:
+                    pct = min(99.0, max(0.0, t_sec / dur * 100.0))
+                    job["percent"] = pct
+                    elapsed = time.time() - t0
+                    if pct > 1.5 and elapsed > 0.2:
+                        job["eta"] = elapsed * (100.0 - pct) / pct
+                    now = time.time()
+                    if now - last_emit > 0.25:
+                        last_emit = now
+                        self._emit("job", self._public(job))
+                elif line and "=" not in line:
+                    tail = (tail + [line])[-5:]
+            proc.wait()
+        finally:
+            self._job_untrack_proc(job, proc)
         if job["cancel"]:
             unlink_quiet(dst)
             return False, "Annullato"
@@ -1332,8 +1537,12 @@ class Api:
                 if kind == "image":
                     job.update(status="converting", percent=50, speed=None, eta=None)
                     self._emit("job", self._public(job))
-                    convertitore.convert_image(src, dst, opts["fmt"], opts.get("image_quality", 85),
-                                               opts.get("image_max_side", 0))
+                    convertitore.convert_image(
+                        src, dst, opts["fmt"],
+                        quality=opts.get("image_quality", "original"),
+                        max_side=opts.get("image_max_side", 0),
+                        max_mb=opts.get("image_max_mb", 0.0),
+                    )
                     job["file"] = str(dst)
                     ok, err = dst.is_file(), "" if dst.is_file() else "Immagine non salvata."
                 else:
@@ -1341,19 +1550,25 @@ class Api:
                     if not ff:
                         raise RuntimeError("ffmpeg non installato")
                     dur = opts.get("duration")
-                    if not dur:
-                        ffp = str(FFPROBE_EXE) if FFPROBE_EXE.exists() else None
-                        dur = convertitore.probe_media(ffp, src).get("duration")
+                    dims = opts.get("dims")
                     want_gpu = bool(opts.get("use_gpu", self.settings.get("convert_gpu", True)))
+                    if not dur or (want_gpu and kind == "video" and not dims):
+                        ffp = str(FFPROBE_EXE) if FFPROBE_EXE.exists() else None
+                        probed = convertitore.probe_media(ffp, src)
+                        dur = dur or probed.get("duration")
+                        dims = dims or probed.get("dims")
                     ginfo = self._conv_gpu_info() if want_gpu else {}
                     gpu_enc = convertitore.gpu_encoder_for(opts["fmt"], ginfo) if want_gpu else None
                     hwaccel = bool(want_gpu and ginfo.get("vendor") and kind == "video"
                                    and opts["fmt"] not in convertitore.AUDIO_OUT)
-                    attempts = ([(gpu_enc, hwaccel)] if (gpu_enc or hwaccel) else []) + [(None, False)]
+                    if want_gpu and gpu_enc in ("h264_nvenc", "av1_nvenc") and hwaccel and convertitore.has_even_dims(dims):
+                        attempts = [(gpu_enc, True, True), (gpu_enc, True, False), (None, False, False)]
+                    else:
+                        attempts = ([(gpu_enc, hwaccel, False)] if (gpu_enc or hwaccel) else []) + [(None, False, False)]
                     ok, err = False, ""
-                    for i, (enc, hw) in enumerate(attempts):
+                    for i, (enc, hw, zc) in enumerate(attempts):
                         cmd = convertitore.build_ffmpeg_cmd(ff, src, dst, kind, opts["fmt"], opts, dur,
-                                                            gpu_enc=enc, hwaccel=hw)
+                                                            gpu_enc=enc, hwaccel=hw, zero_copy=zc)
                         job["hw"] = "GPU" if (enc or hw) else ""
                         t_start = time.time()
                         ok, err = self._run_ffmpeg_convert(job, cmd, dst, dur)
@@ -1361,15 +1576,19 @@ class Api:
                             break
                         if ok:
                             job["file"] = str(dst)
+                            mode_lbl = f"{enc} (zero-copy)" if zc else (enc or ("hwdec" if hw else "cpu"))
                             log.info("conversione %s -> %s completata in %.1fs (%s)", src.suffix, opts["fmt"],
-                                     time.time() - t_start, enc or ("hwdec" if hw else "cpu"))
+                                     time.time() - t_start, mode_lbl)
                             break
                         if i + 1 < len(attempts):
-                            log.warning("conversione GPU (%s) fallita, riprovo su CPU: %s", enc or "hwdec", err)
                             unlink_quiet(dst)
-                            job["hw"] = ""
-                            job["warning"] = "Accelerazione GPU non riuscita per questo file: riprovo sul processore."
-                            self._emit("job", self._public(job))
+                            if zc and attempts[i + 1][0] is not None:
+                                log.warning("zero-copy CUDA non riuscito (%s), riprovo GPU standard: %s", enc, err)
+                            else:
+                                log.warning("conversione GPU (%s) fallita, riprovo su CPU: %s", enc or "hwdec", err)
+                                job["hw"] = ""
+                                job["warning"] = "Accelerazione GPU non riuscita per questo file: riprovo sul processore."
+                                self._emit("job", self._public(job))
             except Exception as e:
                 if dst:
                     unlink_quiet(dst)
@@ -1406,6 +1625,9 @@ class Api:
         while out_base.with_suffix(".txt").exists() or out_base.with_suffix(".srt").exists():
             out_base = out_base.with_name(f"{out_base.name.rsplit(' (', 1)[0]} ({n})")   # non sovrascrive
             n += 1
+        whisper_done = threading.Event()
+        diar_state = {"pct": 0.0, "gpu": False, "ok": False, "turns": [], "warn": ""}
+        diar_thread = None
         try:
             ff = self._exe("ffmpeg")
             if not ff:
@@ -1420,6 +1642,19 @@ class Api:
                 log.warning("conversione per la trascrizione non riuscita: %s", conv.stderr[-200:])
                 return False, "Non riesco a leggere l'audio di questo file."
             seconds = max(1.0, (wav.stat().st_size - 44) / 32000)
+            diar_installed = self._diar_installed()
+            if diarize and diar_installed and not job["cancel"]:
+                def _diar_bg():
+                    try:
+                        d_ok, d_turns = self._run_diarization(
+                            job, wav, speakers, ui_gate=whisper_done, state=diar_state)
+                        diar_state["ok"], diar_state["turns"] = d_ok, d_turns
+                    except Exception:
+                        log.exception("diarizzazione in parallelo fallita")
+
+                diar_thread = threading.Thread(target=_diar_bg, daemon=True)
+                diar_thread.start()
+
             # scheda NVIDIA se attivata e scaricata; se non parte o sbaglia, si rifà sul processore
             engines = ([("gpu", WHISPER_GPU_EXE)] if self._gpu_ready() else []) + [("cpu", WHISPER_EXE)]
             txt = out_base.with_suffix(".txt")
@@ -1442,16 +1677,24 @@ class Api:
                         raw_t = txt_work.read_text(encoding="utf-8", errors="replace").strip()
                         if raw_t:
                             segments = [{"start": 0.0, "end": seconds, "speaker": "", "text": raw_t}]
+                    whisper_done.set()
                     if diarize and segments:
-                        if self._diar_installed():
-                            diar_ok, turns = self._run_diarization(job, wav, speakers)
+                        if diar_thread is not None:
+                            if diar_thread.is_alive():
+                                job.update(status="diarizing", percent=diar_state["pct"], eta=None,
+                                           hw="GPU" if diar_state["gpu"] else "")
+                                self._emit("job", self._public(job))
+                                diar_thread.join()
                             if job["cancel"]:
                                 return False, "Annullato"
+                            diar_ok, turns = diar_state["ok"], diar_state["turns"]
                             if diar_ok and turns:
                                 segments = trascrizione.assign_speakers(segments, turns)
+                            if diar_state["warn"]:
+                                job["warning"] = diar_state["warn"]
                             elif not diar_ok:
                                 job["warning"] = "Separazione interlocutori non riuscita: trascrizione salvata senza nomi."
-                        else:
+                        elif not diar_installed:
                             job["warning"] = "Motore interlocutori non installato: trascrizione salvata senza nomi."
                         if whisper_gpu_used and not job.get("hw"):
                             job["hw"] = "GPU"
@@ -1477,33 +1720,57 @@ class Api:
                                       "la faccio con il processore.")
             return False, "La trascrizione non è riuscita. Riprova, o prova un modello diverso."
         finally:
+            whisper_done.set()
+            if diar_thread is not None and diar_thread.is_alive():
+                with self._lock:
+                    leftovers = list(job.get("procs") or ())
+                for p in leftovers:
+                    if p and p.poll() is None:
+                        self._kill(p)
+                diar_thread.join(timeout=10)
             unlink_quiet(wav, *outputs)
 
-    def _run_diar_once(self, job, exe: Path, work_dir: Path, wav: Path, num_speakers: int, use_gpu: bool):
+    def _run_diar_once(self, job, exe: Path, work_dir: Path, wav: Path, num_speakers: int, use_gpu: bool,
+                       ui_gate: threading.Event | None = None, state: dict | None = None):
         """Esegue sherpa-onnx-offline-speaker-diarization.exe su GPU o CPU."""
         threads = max(1, min((os.cpu_count() or 4) - 2, 8))
         args = trascrizione.build_diar_cmd(
             str(exe), short_path(DIAR_SEG_MODEL), short_path(DIAR_EMB_MODEL),
             short_path(wav), num_speakers=num_speakers, use_gpu=use_gpu, threads=threads,
         )
-        job.update(status="diarizing", percent=0, eta=None, hw="GPU" if use_gpu else "")
-        self._emit("job", self._public(job))
+        ui_active = ui_gate is None or ui_gate.is_set()
+        local_pct = 0.0
+        if state is not None:
+            state["pct"] = 0.0
+            state["gpu"] = bool(use_gpu)
+        if ui_active:
+            job.update(status="diarizing", percent=0, eta=None, hw="GPU" if use_gpu else "")
+            self._emit("job", self._public(job))
         t0, last_emit, turns, tail, saw_gpu_fail = time.time(), 0.0, [], [], False
         env = {**os.environ, "PATH": str(work_dir) + os.pathsep + os.environ.get("PATH", "")} if use_gpu else None
+        proc = None
         try:
             proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                     encoding="utf-8", errors="replace", creationflags=NO_WINDOW,
                                     cwd=str(work_dir), env=env, bufsize=1)
-            job["proc"] = proc
+            self._job_track_proc(job, proc)
             for line in proc.stdout:
+                if not ui_active and ui_gate is not None and ui_gate.is_set():
+                    ui_active = True
+                    job.update(status="diarizing", percent=local_pct, eta=None, hw="GPU" if use_gpu else "")
+                    self._emit("job", self._public(job))
                 pm = trascrizione.DIAR_PROGRESS_RE.search(line)
                 if pm:
-                    job["percent"] = min(99.0, float(pm.group(1)))
-                    if job["percent"] > 2:
-                        job["eta"] = (time.time() - t0) * (100 - job["percent"]) / job["percent"]
-                    if time.time() - last_emit > 0.35:
-                        last_emit = time.time()
-                        self._emit("job", self._public(job))
+                    local_pct = min(99.0, float(pm.group(1)))
+                    if state is not None:
+                        state["pct"] = local_pct
+                    if ui_active:
+                        job["percent"] = local_pct
+                        if local_pct > 2:
+                            job["eta"] = (time.time() - t0) * (100 - local_pct) / local_pct
+                        if time.time() - last_emit > 0.35:
+                            last_emit = time.time()
+                            self._emit("job", self._public(job))
                 else:
                     lm = trascrizione.DIAR_LINE_RE.match(line)
                     if lm:
@@ -1517,27 +1784,42 @@ class Api:
             return proc.returncode == 0, (use_gpu and not saw_gpu_fail), turns, tail, time.time() - t0
         except Exception as e:
             return False, False, [], [str(e)], time.time() - t0
+        finally:
+            if proc is not None:
+                self._job_untrack_proc(job, proc)
 
-    def _run_diarization(self, job, wav: Path, num_speakers: int = 0):
+    def _run_diarization(self, job, wav: Path, num_speakers: int = 0,
+                         ui_gate: threading.Event | None = None, state: dict | None = None):
         """Esegue la diarizzazione su GPU NVIDIA se pronta, altrimenti su CPU (con fallback automatico)."""
         engines = ([("gpu", DIAR_GPU_EXE, DIAR_GPU_DIR)] if self._diar_gpu_ready() else []) + [
             ("cpu", DIAR_EXE, DIAR_DIR)
         ]
         for i, (kind, exe, work_dir) in enumerate(engines):
-            ok, used_gpu, turns, tail, secs = self._run_diar_once(job, exe, work_dir, wav, num_speakers, kind == "gpu")
+            ok, used_gpu, turns, tail, secs = self._run_diar_once(
+                job, exe, work_dir, wav, num_speakers, kind == "gpu", ui_gate=ui_gate, state=state)
             if job["cancel"]:
                 return False, []
             if ok:
                 if kind == "gpu" and not used_gpu:
-                    job["hw"] = ""
-                    job["warning"] = ("La scheda NVIDIA non è stata usata per gli interlocutori "
-                                      f"(serve driver NVIDIA ≥ {trascrizione.DIAR_GPU_MIN_DRIVER}): elaborazione sul processore.")
+                    w = ("La scheda NVIDIA non è stata usata per gli interlocutori "
+                         f"(serve driver NVIDIA ≥ {trascrizione.DIAR_GPU_MIN_DRIVER}): elaborazione sul processore.")
+                    if state is not None:
+                        state["warn"] = w
+                        state["gpu"] = False
+                    if ui_gate is None or ui_gate.is_set():
+                        job["hw"] = ""
+                        job["warning"] = w
                 log.info("diarizzazione: %d turni in %.1fs (%s)", len(turns), secs, "GPU" if used_gpu else "processore")
                 return True, turns
             log.warning("diarizzazione %s non riuscita: %s", kind, " | ".join(tail)[-300:])
             if kind == "gpu" and i + 1 < len(engines):
-                job["hw"] = ""
-                job["warning"] = "La scheda NVIDIA non ha funzionato per gli interlocutori: riprovo sul processore."
+                w = "La scheda NVIDIA non ha funzionato per gli interlocutori: riprovo sul processore."
+                if state is not None:
+                    state["warn"] = w
+                    state["gpu"] = False
+                if ui_gate is None or ui_gate.is_set():
+                    job["hw"] = ""
+                    job["warning"] = w
         return False, []
 
     def _diar_installed(self):
@@ -1568,20 +1850,23 @@ class Api:
         t0, last, tail, used_gpu = time.time(), 0, [], False
         proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                 encoding="utf-8", errors="replace", creationflags=NO_WINDOW)
-        job["proc"] = proc
-        for line in proc.stdout:
-            m = trascrizione.PROGRESS_RE.search(line)
-            if m:
-                job["percent"] = min(99.0, float(m.group(1)))
-                if job["percent"] > 2:
-                    job["eta"] = (time.time() - t0) * (100 - job["percent"]) / job["percent"]
-                if time.time() - last > 0.5:
-                    last = time.time()
-                    self._emit("job", self._public(job))
-            else:
-                used_gpu = used_gpu or bool(trascrizione.GPU_OK_RE.search(line))
-                tail = (tail + [line.strip()])[-5:]
-        proc.wait()
+        self._job_track_proc(job, proc)
+        try:
+            for line in proc.stdout:
+                m = trascrizione.PROGRESS_RE.search(line)
+                if m:
+                    job["percent"] = min(99.0, float(m.group(1)))
+                    if job["percent"] > 2:
+                        job["eta"] = (time.time() - t0) * (100 - job["percent"]) / job["percent"]
+                    if time.time() - last > 0.5:
+                        last = time.time()
+                        self._emit("job", self._public(job))
+                else:
+                    used_gpu = used_gpu or bool(trascrizione.GPU_OK_RE.search(line))
+                    tail = (tail + [line.strip()])[-5:]
+            proc.wait()
+        finally:
+            self._job_untrack_proc(job, proc)
         self._last_code = proc.returncode
         ok = proc.returncode == 0 and out_base.with_suffix(".txt").is_file()
         return ok, used_gpu, tail, time.time() - t0
@@ -1722,9 +2007,10 @@ class Api:
         return {"ok": True, "segments": updated, "raw": txt_out}
 
     def _system(self):
-        if self._sysinfo is None:
-            self._sysinfo = self._read_system()
-        return self._sysinfo
+        with self._probe_lock:
+            if self._sysinfo is None:
+                self._sysinfo = self._read_system()
+            return self._sysinfo
 
     @staticmethod
     def _read_system():
@@ -1831,90 +2117,107 @@ class Api:
         shutil.rmtree(WHISPER_GPU_DIR, ignore_errors=True)
         return {"ok": True, **self.whisper_info()}
 
-    def _extract_tar_bz2(self, url, label, dest_dir: Path, keep, expected_sha, event="model",
-                         progress_offset=0, progress_total=None):
-        """Scarica un archivio .tar.bz2, ne verifica l'impronta SHA-256 ed estrae i file richiesti."""
+    def _extract_archive(self, url, label, dest_dir: Path, keep, expected_sha, kind,
+                         event="model", progress_offset=0, progress_total=None, on_progress=None):
+        """Scarica un archivio (.tar.bz2 o zip/whl/nupkg), verifica lo SHA-256 in streaming ed estrae."""
+        ext = ".tar.bz2" if kind == "tar" else ".zip"
         safe = re.sub(r"[^A-Za-z0-9._-]", "_", label)
-        tpath = BIN_DIR / f"{safe}.tar.bz2"
+        apath = BIN_DIR / f"{safe}{ext}"
         try:
-            self._download_file(url, tpath, label, event=event,
-                                progress_offset=progress_offset, progress_total=progress_total)
-            if trascrizione.sha256_file(tpath) != expected_sha.lower():
+            size, got_sha = self._download_file(
+                url, apath, label, event=event,
+                progress_offset=progress_offset, progress_total=progress_total,
+                on_progress=on_progress,
+            )
+            if got_sha != expected_sha.lower():
                 raise ValueError(f"{label}: il file scaricato è rovinato o non corrisponde all'impronta.")
-            done_base = progress_offset + (tpath.stat().st_size if tpath.exists() else 0)
-            self._emit(event, {"label": f"Estrazione {label}", "done": done_base,
-                               "total": progress_total or done_base or 1})
-            with tarfile.open(tpath, "r:bz2") as tf:
-                for m in tf.getmembers():
-                    if not m.isfile():
-                        continue
-                    rel = keep(m.name)
-                    if not rel:
-                        continue
-                    relp = self._safe_rel_path(label, m.name, rel)
-                    out = dest_dir / relp
-                    out.parent.mkdir(parents=True, exist_ok=True)
-                    with tf.extractfile(m) as src, open(out, "wb") as dst:
-                        shutil.copyfileobj(src, dst)
+            if on_progress is None:
+                done_base = progress_offset + size
+                self._emit(event, {"label": f"Estrazione {label}", "done": done_base,
+                                   "total": progress_total or done_base or 1})
+            if kind == "tar":
+                with tarfile.open(apath, "r:bz2") as tf:
+                    for m in tf.getmembers():
+                        if not m.isfile():
+                            continue
+                        rel = keep(m.name)
+                        if not rel:
+                            continue
+                        relp = self._safe_rel_path(label, m.name, rel)
+                        out = dest_dir / relp
+                        out.parent.mkdir(parents=True, exist_ok=True)
+                        with tf.extractfile(m) as src, open(out, "wb") as dst:
+                            shutil.copyfileobj(src, dst)
+            else:
+                with zipfile.ZipFile(apath) as zf:
+                    for m in zf.infolist():
+                        if m.is_dir():
+                            continue
+                        rel = keep(m.filename)
+                        if not rel:
+                            continue
+                        relp = self._safe_rel_path(label, m.filename, rel)
+                        out = dest_dir / relp
+                        out.parent.mkdir(parents=True, exist_ok=True)
+                        with zf.open(m) as src, open(out, "wb") as dst:
+                            shutil.copyfileobj(src, dst)
         finally:
-            unlink_quiet(tpath)
+            unlink_quiet(apath)
+
+    def _extract_tar_bz2(self, url, label, dest_dir: Path, keep, expected_sha, event="model",
+                         progress_offset=0, progress_total=None, on_progress=None):
+        """Scarica un archivio .tar.bz2, ne verifica l'impronta SHA-256 ed estrae i file richiesti."""
+        self._extract_archive(url, label, dest_dir, keep, expected_sha, "tar",
+                              event=event, progress_offset=progress_offset,
+                              progress_total=progress_total, on_progress=on_progress)
 
     def _extract_zip_into(self, url, label, dest_dir: Path, keep, expected_sha, event="model",
-                          progress_offset=0, progress_total=None):
+                          progress_offset=0, progress_total=None, on_progress=None):
         """Scarica un archivio zip/whl/nupkg, ne verifica l'impronta SHA-256 ed estrae in dest_dir."""
-        safe = re.sub(r"[^A-Za-z0-9._-]", "_", label)
-        zpath = BIN_DIR / f"{safe}.zip"
-        try:
-            self._download_file(url, zpath, label, event=event,
-                                progress_offset=progress_offset, progress_total=progress_total)
-            if trascrizione.sha256_file(zpath) != expected_sha.lower():
-                raise ValueError(f"{label}: il file scaricato è rovinato o non corrisponde all'impronta.")
-            done_base = progress_offset + (zpath.stat().st_size if zpath.exists() else 0)
-            self._emit(event, {"label": f"Estrazione {label}", "done": done_base,
-                               "total": progress_total or done_base or 1})
-            with zipfile.ZipFile(zpath) as zf:
-                for m in zf.infolist():
-                    if m.is_dir():
-                        continue
-                    rel = keep(m.filename)
-                    if not rel:
-                        continue
-                    relp = self._safe_rel_path(label, m.filename, rel)
-                    out = dest_dir / relp
-                    out.parent.mkdir(parents=True, exist_ok=True)
-                    with zf.open(m) as src, open(out, "wb") as dst:
-                        shutil.copyfileobj(src, dst)
-        finally:
-            unlink_quiet(zpath)
+        self._extract_archive(url, label, dest_dir, keep, expected_sha, "zip",
+                              event=event, progress_offset=progress_offset,
+                              progress_total=progress_total, on_progress=on_progress)
 
     def _install_diarization(self):
         tmp = DIAR_DIR.with_name(DIAR_DIR.name + ".new")
         shutil.rmtree(tmp, ignore_errors=True)
         tmp.mkdir(parents=True, exist_ok=True)
-        total = trascrizione.DIAR_TOTAL_SIZE
-        offset = 0
+        agg = self._make_progress_agg("model", "Componenti interlocutori",
+                                      total_hint=trascrizione.DIAR_TOTAL_SIZE)
         try:
-            self._extract_tar_bz2(
-                trascrizione.DIAR_ENGINE_URL, "motore interlocutori", tmp,
-                lambda n: n.replace("\\", "/").split("/")[-1]
-                if n.replace("\\", "/").split("/")[-1] in trascrizione.DIAR_ENGINE_FILES else None,
-                trascrizione.DIAR_ENGINE_SHA, event="model",
-                progress_offset=offset, progress_total=total,
-            )
-            offset += trascrizione.DIAR_ENGINE_SIZE
-            self._extract_tar_bz2(
-                trascrizione.DIAR_SEG_URL, "modello segmentazione", tmp,
-                lambda n: "pyannote-segmentation.onnx" if n.replace("\\", "/").endswith("/model.onnx") else None,
-                trascrizione.DIAR_SEG_SHA, event="model",
-                progress_offset=offset, progress_total=total,
-            )
-            offset += trascrizione.DIAR_SEG_SIZE
-            emb_tmp = tmp / "wespeaker-embedding.onnx.part"
-            self._download_file(trascrizione.DIAR_EMB_URL, emb_tmp, "modello voci", event="model",
-                                progress_offset=offset, progress_total=total)
-            if trascrizione.sha256_file(emb_tmp) != trascrizione.DIAR_EMB_SHA.lower():
-                raise ValueError("modello voci: il file scaricato non corrisponde all'impronta.")
-            os.replace(emb_tmp, tmp / "wespeaker-embedding.onnx")
+            p_eng = agg("engine", trascrizione.DIAR_ENGINE_SIZE)
+            p_seg = agg("seg", trascrizione.DIAR_SEG_SIZE)
+            p_emb = agg("emb", trascrizione.DIAR_EMB_SIZE)
+
+            def _do_eng():
+                self._extract_tar_bz2(
+                    trascrizione.DIAR_ENGINE_URL, "motore interlocutori", tmp,
+                    lambda n: n.replace("\\", "/").split("/")[-1]
+                    if n.replace("\\", "/").split("/")[-1] in trascrizione.DIAR_ENGINE_FILES else None,
+                    trascrizione.DIAR_ENGINE_SHA, event="model", on_progress=p_eng,
+                )
+
+            def _do_seg():
+                self._extract_tar_bz2(
+                    trascrizione.DIAR_SEG_URL, "modello segmentazione", tmp,
+                    lambda n: "pyannote-segmentation.onnx" if n.replace("\\", "/").endswith("/model.onnx") else None,
+                    trascrizione.DIAR_SEG_SHA, event="model", on_progress=p_seg,
+                )
+
+            def _do_emb():
+                emb_tmp = tmp / "wespeaker-embedding.onnx.part"
+                _, got_sha = self._download_file(
+                    trascrizione.DIAR_EMB_URL, emb_tmp, "modello voci",
+                    event="model", on_progress=p_emb,
+                )
+                if got_sha != trascrizione.DIAR_EMB_SHA.lower():
+                    raise ValueError("modello voci: il file scaricato non corrisponde all'impronta.")
+                os.replace(emb_tmp, tmp / "wespeaker-embedding.onnx")
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
+                futs = [ex.submit(fn) for fn in (_do_eng, _do_seg, _do_emb)]
+                for fut in futs:
+                    fut.result()
 
             if not all((tmp / f).is_file() for f in (
                 *trascrizione.DIAR_ENGINE_FILES, "pyannote-segmentation.onnx", "wespeaker-embedding.onnx"
@@ -1937,8 +2240,9 @@ class Api:
         tmp = DIAR_GPU_DIR.with_name(DIAR_GPU_DIR.name + ".new")
         shutil.rmtree(tmp, ignore_errors=True)
         tmp.mkdir(parents=True, exist_ok=True)
-        total = trascrizione.DIAR_GPU_TOTAL_SIZE
-        offset = 0
+        pkgs = trascrizione.DIAR_GPU_PACKAGES
+        agg = self._make_progress_agg("model", "Accelerazione NVIDIA interlocutori",
+                                      total_hint=trascrizione.DIAR_GPU_TOTAL_SIZE)
         try:
             for fname in trascrizione.DIAR_GPU_SHARED_BINS:
                 src = DIAR_DIR / fname
@@ -1947,7 +2251,7 @@ class Api:
                     os.link(src, dst)
                 except OSError:
                     shutil.copy2(src, dst)
-            pkgs = trascrizione.DIAR_GPU_PACKAGES
+            tasks = []
             for idx, pkg in enumerate(pkgs, 1):
                 prefix = pkg["prefix"]
                 allowed = pkg["files"]
@@ -1959,12 +2263,20 @@ class Api:
                     base = norm.rsplit("/", 1)[-1]
                     return base if base in _f else None
 
-                self._extract_zip_into(
-                    pkg["url"], f"{pkg['label']} ({idx}/{len(pkgs)})", tmp,
-                    _keep, pkg["sha"], event="model",
-                    progress_offset=offset, progress_total=total,
-                )
-                offset += pkg["size"]
+                prog = agg(f"gpu-{idx}", pkg["size"])
+                tasks.append((pkg, _keep, prog, idx))
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(tasks)) as ex:
+                futs = [
+                    ex.submit(
+                        self._extract_zip_into,
+                        pkg["url"], f"{pkg['label']} ({idx}/{len(pkgs)})", tmp,
+                        keep_fn, pkg["sha"], event="model", on_progress=prog,
+                    )
+                    for pkg, keep_fn, prog, idx in tasks
+                ]
+                for fut in futs:
+                    fut.result()
             if not all((tmp / f).is_file() for f in trascrizione.DIAR_GPU_REQUIRED_FILES):
                 raise ValueError("installazione accelerazione GPU interlocutori incompleta.")
             old = DIAR_GPU_DIR.with_name(DIAR_GPU_DIR.name + ".old")
@@ -2036,8 +2348,9 @@ class Api:
             dest = MODELS_DIR / file
             if not dest.is_file():
                 tmp = MODELS_DIR / (file + ".download")
-                self._download_file(trascrizione.MODEL_URL.format(file=file), tmp, m["name"], event="model")
-                if tmp.stat().st_size != size or trascrizione.sha256_file(tmp) != sha:
+                got_size, got_sha = self._download_file(
+                    trascrizione.MODEL_URL.format(file=file), tmp, m["name"], event="model")
+                if got_size != size or got_sha != sha:
                     tmp.unlink(missing_ok=True)
                     raise ValueError("il modello scaricato non è integro. Riprova.")
                 os.replace(tmp, dest)
@@ -2114,7 +2427,7 @@ class Api:
         source = ["--load-info-json", str(info_file)] if info_file else ["--", job["url"]]
         args = [self._exe("yt-dlp"), *self._base_args(cookies, tmp), *self._format_args(opts),
                 *(clip_args or []),
-                "-N", "4",   # frammenti in parallelo (HLS/DASH: Instagram, TikTok, Twitch, X…)
+                "-N", "8",   # frammenti in parallelo (HLS/DASH: Instagram, TikTok, Twitch, X…)
                 "--yes-playlist" if opts["playlist"] else "--no-playlist",
                 "-P", opts["folder"],
                 "-o", "%(title).150B [%(id)s].%(ext)s",
@@ -2134,40 +2447,58 @@ class Api:
         self._emit("job", self._public(job))
         last_err = ""
         last_emit = 0
+        t0_dl = time.time()
+        clip_dur = job.get("clip_dur")
         proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 text=True, encoding="utf-8", errors="replace",
                                 creationflags=NO_WINDOW, bufsize=1)
-        job["proc"] = proc
-        for line in proc.stdout:
-            line = line.rstrip()
-            if line.startswith("@@P|"):
-                _, done, total, est, speed, eta = (line.split("|") + [""] * 6)[:6]
-                done, total = num(done), num(total) or num(est)
-                if done and total:
-                    job["percent"] = min(100.0, done / total * 100)
-                job["speed"], job["eta"] = num(speed), num(eta)
-                now = time.time()
-                if now - last_emit > 0.25:
-                    last_emit = now
+        self._job_track_proc(job, proc)
+        try:
+            for line in proc.stdout:
+                line = line.rstrip()
+                if line.startswith("@@P|"):
+                    _, done, total, est, speed, eta = (line.split("|") + [""] * 6)[:6]
+                    done, total = num(done), num(total) or num(est)
+                    if done and total:
+                        job["percent"] = min(100.0, done / total * 100)
+                    job["speed"], job["eta"] = num(speed), num(eta)
+                    now = time.time()
+                    if now - last_emit > 0.25:
+                        last_emit = now
+                        self._emit("job", self._public(job))
+                elif line.startswith("@@T|"):
+                    _, idx, n, title = (line.split("|", 3) + [""] * 4)[:4]
+                    title = unjson(title)[:300]
+                    job["percent"], job["status"] = 0, "downloading"
+                    if idx not in ("NA", "None") and n not in ("NA", "None"):
+                        job["item"] = f"{idx}/{n}"      # playlist: titolo resta quello della playlist
+                        job["current"] = title
+                    elif job["title"] == job["url"]:
+                        job["title"] = title
                     self._emit("job", self._public(job))
-            elif line.startswith("@@T|"):
-                _, idx, n, title = (line.split("|", 3) + [""] * 4)[:4]
-                title = unjson(title)[:300]
-                job["percent"], job["status"] = 0, "downloading"
-                if idx not in ("NA", "None") and n not in ("NA", "None"):
-                    job["item"] = f"{idx}/{n}"      # playlist: titolo resta quello della playlist
-                    job["current"] = title
-                elif job["title"] == job["url"]:
-                    job["title"] = title
-                self._emit("job", self._public(job))
-            elif line.startswith("@@F|"):
-                job["file"] = unjson(line[4:])
-            elif "[Merger]" in line or "[ExtractAudio]" in line or "[ThumbnailsConvertor]" in line:
-                job["status"] = "processing"
-                self._emit("job", self._public(job))
-            elif line.startswith("ERROR"):
-                last_err = line.replace("ERROR: ", "")
-        proc.wait()
+                elif line.startswith("@@F|"):
+                    job["file"] = unjson(line[4:])
+                elif "[Merger]" in line or "[ExtractAudio]" in line or "[ThumbnailsConvertor]" in line:
+                    job["status"] = "processing"
+                    self._emit("job", self._public(job))
+                elif line.startswith("ERROR"):
+                    last_err = line.replace("ERROR: ", "")
+                elif clip_args:
+                    t_sec = convertitore.parse_ffmpeg_stats_time(line)
+                    if t_sec is not None:
+                        if clip_dur and clip_dur > 0:
+                            pct = min(99.0, max(0.0, t_sec / clip_dur * 100.0))
+                            job["percent"] = pct
+                            elapsed = time.time() - t0_dl
+                            if pct > 1.5 and elapsed > 0.2:
+                                job["eta"] = elapsed * (100.0 - pct) / pct
+                        now = time.time()
+                        if now - last_emit > 0.25:
+                            last_emit = now
+                            self._emit("job", self._public(job))
+            proc.wait()
+        finally:
+            self._job_untrack_proc(job, proc)
         return proc.returncode, last_err
 
     def cancel(self, job_id):
@@ -2175,9 +2506,14 @@ class Api:
         if not job:
             return False
         job["cancel"] = True
-        proc = job.get("proc")
-        if proc and proc.poll() is None:
-            self._kill(proc)
+        with self._lock:
+            procs = list(job.get("procs") or ())
+            if job.get("proc") and job["proc"] not in procs:
+                procs.append(job["proc"])
+        alive = [p for p in procs if p and p.poll() is None]
+        if alive:
+            for p in alive:
+                self._kill(p)
         elif job["status"] == "queued":
             job["status"] = "cancelled"
             self._emit("job", self._public(job))
@@ -2201,7 +2537,7 @@ class Api:
         if job.get("kind") == "transcribe":
             ov["from_transcribe"] = True
         return self.start_download(job["url"], {"title": job["title"], "thumbnail": job["thumbnail"],
-                                                "site": job["site"]}, ov or None)
+                                                "site": job["site"], "duration": job.get("duration")}, ov or None)
 
     def clear_finished(self, kind=None):
         with self._lock:
@@ -2489,17 +2825,18 @@ class Api:
         new = exe.with_name(exe.stem + ".new.exe")
         try:
             try:
-                self._download_file(url, new, f"AxTools {info['latest']}", event="update")
+                got_size, got_sha = self._download_file(url, new, f"AxTools {info['latest']}", event="update")
             except PermissionError:          # cartella dell'EXE non scrivibile: uso la cartella temporanea
                 new = Path(os.environ.get("TEMP", str(DATA_DIR))) / "AxTools.new.exe"
-                self._download_file(url, new, f"AxTools {info['latest']}", event="update")
-            data = new.read_bytes()
-            if len(data) < 1_000_000 or data[:2] != b"MZ":
+                got_size, got_sha = self._download_file(url, new, f"AxTools {info['latest']}", event="update")
+            with open(new, "rb") as f:
+                magic = f.read(2)
+            if got_size < 1_000_000 or magic != b"MZ":
                 raise ValueError("il file scaricato non è un EXE valido")
             # il file scaricato deve essere esattamente quello firmato
-            if len(data) != signed_size:
+            if got_size != signed_size:
                 raise ValueError("download incompleto o file diverso da quello firmato")
-            if hashlib.sha256(data).hexdigest() != signed_sha:
+            if got_sha != signed_sha:
                 raise ValueError("il file scaricato non è quello firmato")
         except Exception as e:
             new.unlink(missing_ok=True)
@@ -2541,16 +2878,13 @@ class Api:
         return True
 
     def _diagnostics(self):
-        """Nel log: dati del PC e quanto ci mette yt-dlp solo ad avviarsi (antivirus, disco lento…)."""
+        """Nel log: dati del PC e dimensione dei componenti installati (usando la cache versione)."""
         import platform
         log.info("sistema: Windows %s, %s core, AxTools %s", platform.version(), os.cpu_count(),
                  "exe" if getattr(sys, "frozen", False) else "sviluppo")
-        exe = self._exe("yt-dlp")
-        if exe:
-            t0 = time.time()
-            subprocess.run([exe, "--version"], capture_output=True, creationflags=NO_WINDOW, timeout=60)
-            log.info("avvio yt-dlp: %.1fs | componenti: %.0f MB", time.time() - t0,
-                     dir_size(BIN_DIR) / 2**20)
+        ver = self.version()
+        if ver:
+            log.info("yt-dlp: %s | componenti: %.0f MB", ver, dir_size(BIN_DIR) / 2**20)
 
     def uninstall(self):
         """Elimina dati in AppData, l'EXE e i suoi collegamenti, dopo la chiusura dell'app."""

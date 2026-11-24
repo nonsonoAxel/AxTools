@@ -106,6 +106,28 @@ assert convertitore.detect_kind("audio.flac") == "audio"
 assert convertitore.detect_kind("foto.webp") == "image"
 assert "gif" in convertitore.allowed_outputs("video")
 assert convertitore.parse_ffmpeg_time_us("out_time_us=2500000") == 2.5
+assert convertitore.parse_ffmpeg_stats_time("frame=120 fps=60 time=00:01:23.45 bitrate=500kbits/s speed=9.2x") == 83.45
+assert convertitore.parse_ffmpeg_stats_time("frame=1 time=N/A bitrate=N/A") is None
+assert convertitore.clip_gpu_downloader_args(None) == []
+dl_nv = convertitore.clip_gpu_downloader_args("h264_nvenc")
+assert dl_nv[0] == "--downloader-args" and "ffmpeg_i1:-hwaccel auto" in dl_nv
+assert "ffmpeg_o:" in dl_nv[3] and "h264_nvenc" in dl_nv[3] and "yuv420p" in dl_nv[3]
+assert "h264_amf" in " ".join(convertitore.clip_gpu_downloader_args("h264_amf"))
+dl_qsv = convertitore.clip_gpu_downloader_args("h264_qsv")
+assert "h264_qsv" in " ".join(dl_qsv) and "nv12" in " ".join(dl_qsv)
+assert convertitore.has_even_dims("1920×1080") and convertitore.has_even_dims("1920x1080")
+assert not convertitore.has_even_dims("1919×1080") and not convertitore.has_even_dims("0×1080")
+assert not convertitore.has_even_dims(None) and not convertitore.has_even_dims("")
+cmd_zc = convertitore.build_ffmpeg_cmd("ffmpeg", Path("in.mkv"), Path("out.mp4"), "video", "mp4",
+                                       {"video_preset": "high"}, duration=60.0,
+                                       gpu_enc="h264_nvenc", hwaccel=True, zero_copy=True)
+assert "-hwaccel" in cmd_zc and "cuda" in cmd_zc and "-hwaccel_output_format" in cmd_zc
+assert "scale=trunc" not in " ".join(cmd_zc) and "-pix_fmt" not in cmd_zc
+cmd_std = convertitore.build_ffmpeg_cmd("ffmpeg", Path("in.mkv"), Path("out.mp4"), "video", "mp4",
+                                        {"video_preset": "high"}, duration=60.0,
+                                        gpu_enc="h264_nvenc", hwaccel=True, zero_copy=False)
+assert "auto" in cmd_std and "-hwaccel_output_format" not in cmd_std
+assert "scale=trunc(iw/2)*2:trunc(ih/2)*2" in cmd_std and "-pix_fmt" in cmd_std
 cmd_c10 = convertitore.build_ffmpeg_cmd("ffmpeg", Path("a.mp4"), Path("b.mp4"), "video", "mp4",
                                         {"video_preset": "compact10"}, duration=40.0)
 assert "-b:v" in cmd_c10
@@ -153,19 +175,73 @@ cmd_aud = convertitore.build_ffmpeg_cmd("ffmpeg", Path("in.mp4"), Path("out.mp3"
                                         gpu_enc=None, hwaccel=True)
 assert "-hwaccel" not in cmd_aud and "libmp3lame" in cmd_aud
 
+qp100 = convertitore.video_quality_params(100)
+qp80 = convertitore.video_quality_params(80)
+qp50 = convertitore.video_quality_params(50)
+qp10 = convertitore.video_quality_params(10)
+assert convertitore.video_quality_params(150)["quality"] == 100
+assert convertitore.video_quality_params(1)["quality"] == 10
+assert qp100["h264_nvenc"] < qp80["h264_nvenc"] < qp50["h264_nvenc"] < qp10["h264_nvenc"]
+assert qp100["libx264"] < qp80["libx264"] < qp50["libx264"] < qp10["libx264"]
+assert qp100["high_effort"] and not qp50["high_effort"]
+assert qp100["audio_kbps"] == 192 and qp50["audio_kbps"] == 96 and qp10["audio_kbps"] == 64
+
+for enc, flag in (("h264_nvenc", "-cq"), ("av1_nvenc", "-cq"), ("h264_amf", "-qp_i"), ("h264_qsv", "-global_quality")):
+    c_hi = convertitore.build_ffmpeg_cmd("ffmpeg", Path("in.mkv"), Path("out.mp4"), "video", "mp4",
+                                         {"video_quality": 100}, duration=60.0, gpu_enc=enc, hwaccel=True,
+                                         zero_copy=(enc == "h264_nvenc"))
+    c_lo = convertitore.build_ffmpeg_cmd("ffmpeg", Path("in.mkv"), Path("out.mp4"), "video", "mp4",
+                                         {"video_quality": 50}, duration=60.0, gpu_enc=enc, hwaccel=True,
+                                         zero_copy=False)
+    assert int(c_hi[c_hi.index(flag) + 1]) < int(c_lo[c_lo.index(flag) + 1])
+    if enc == "h264_nvenc":
+        assert "-tune" in c_hi and "hq" in c_hi and "-tune" not in c_lo
+        assert "-hwaccel_output_format" in c_hi and "-hwaccel_output_format" not in c_lo
+
+c_x264_hi = convertitore.build_ffmpeg_cmd("ffmpeg", Path("in.mp4"), Path("out.mp4"), "video", "mp4",
+                                          {"video_quality": 100}, duration=60.0)
+c_x264_lo = convertitore.build_ffmpeg_cmd("ffmpeg", Path("in.mp4"), Path("out.mp4"), "video", "mp4",
+                                          {"video_quality": 50}, duration=60.0)
+assert int(c_x264_hi[c_x264_hi.index("-crf") + 1]) < int(c_x264_lo[c_x264_lo.index("-crf") + 1])
+c_vp9_hi = convertitore.build_ffmpeg_cmd("ffmpeg", Path("in.mp4"), Path("out.webm"), "video", "webm",
+                                         {"video_quality": 100}, duration=60.0)
+c_vp9_lo = convertitore.build_ffmpeg_cmd("ffmpeg", Path("in.mp4"), Path("out.webm"), "video", "webm",
+                                         {"video_quality": 50}, duration=60.0)
+assert int(c_vp9_hi[c_vp9_hi.index("-crf") + 1]) < int(c_vp9_lo[c_vp9_lo.index("-crf") + 1])
+
+c_mb_gpu = convertitore.build_ffmpeg_cmd("ffmpeg", Path("in.mp4"), Path("out.mp4"), "video", "mp4",
+                                         {"video_quality": 100, "video_max_mb": 25}, duration=60.0,
+                                         gpu_enc="h264_nvenc", hwaccel=True, zero_copy=True)
+assert "-b:v" in c_mb_gpu and "-maxrate" in c_mb_gpu and "-bufsize" in c_mb_gpu and "-cq" not in c_mb_gpu
+c_mb_cpu = convertitore.build_ffmpeg_cmd("ffmpeg", Path("in.mp4"), Path("out.mp4"), "video", "mp4",
+                                         {"video_quality": 100, "video_max_mb": 25}, duration=60.0)
+assert "-b:v" in c_mb_cpu and "-maxrate" in c_mb_cpu and "-bufsize" in c_mb_cpu and "-crf" not in c_mb_cpu
+
 tmp_sc = Path(tempfile.mkdtemp(prefix="axtools_sc2_"))
 try:
     s_png = tmp_sc / "foto.png"
     s_png.write_bytes(b"x")
     assert convertitore.unique_dest(s_png, "png", tmp_sc).name == "foto (2).png"
     try:
+        import random
         from PIL import Image
         Image.new("RGBA", (20, 10), (116, 87, 240, 200)).save(s_png)
         jpg_out = tmp_sc / "out.jpg"
+        jpg_orig = tmp_sc / "out_orig.jpg"
         ico_out = tmp_sc / "out.ico"
         convertitore.convert_image(s_png, jpg_out, "jpg", 85, 10)
+        convertitore.convert_image(s_png, jpg_orig, "jpg", "original")
         convertitore.convert_image(s_png, ico_out, "ico")
-        assert jpg_out.is_file() and ico_out.is_file()
+        assert jpg_out.is_file() and jpg_orig.is_file() and ico_out.is_file()
+
+        rng = random.Random(42)
+        noisy = tmp_sc / "noisy.png"
+        noise_bytes = bytes(rng.randrange(256) for _ in range(420 * 420 * 3))
+        Image.frombytes("RGB", (420, 420), noise_bytes).save(noisy)
+        for ext in ("jpg", "webp", "png"):
+            capped = tmp_sc / f"capped.{ext}"
+            convertitore.convert_image(noisy, capped, ext, "original", max_mb=0.06)
+            assert capped.is_file() and capped.stat().st_size <= 60_000, (ext, capped.stat().st_size)
     except ImportError:
         pass
 finally:
@@ -193,8 +269,14 @@ assert plain[0]["start"] == 84.0 and plain[0]["speaker"] == "Mario" and plain[0]
 assert app.parse_timecode("1:30") == 90.0 and app.parse_timecode("1:02:03") == 3723.0
 c_prec = app.build_clip_args("0:10", "0:40", fast_cut=False)
 assert "--download-sections" in c_prec and "--force-keyframes-at-cuts" in c_prec
+assert "--downloader-args" not in c_prec
+c_gpu = app.build_clip_args("0:10", "0:40", fast_cut=False, gpu_enc="h264_nvenc")
+assert "--download-sections" in c_gpu and "--force-keyframes-at-cuts" in c_gpu
+assert "--downloader-args" in c_gpu and "h264_nvenc" in " ".join(c_gpu)
 c_fast = app.build_clip_args("0:10", "0:40", fast_cut=True)
 assert "--download-sections" in c_fast and "--force-keyframes-at-cuts" not in c_fast
+c_fast_gpu = app.build_clip_args("0:10", "0:40", fast_cut=True, gpu_enc="h264_nvenc")
+assert "--force-keyframes-at-cuts" not in c_fast_gpu and "--downloader-args" not in c_fast_gpu
 cs = app.clean_settings({"whisper_timestamps": True, "whisper_speakers": 4, "convert_dest": "downloads",
                           "convert_gpu": False, "whisper_diarize_gpu": True})
 assert cs["whisper_timestamps"] is True and cs["whisper_speakers"] == 4 and cs["convert_dest"] == "downloads"
@@ -236,7 +318,17 @@ finally:
         p.unlink(missing_ok=True)
 
 cv_job = api._new_job(title="x.mp4", kind="convert", status="done")
-dl_job = api._new_job(title="y.mp4", kind="download", status="done")
+dl_job = api._new_job(title="y.mp4", kind="download", status="done", clip_dur=30.0, duration=120.0)
+pub_dl = api._public(dl_job)
+assert "procs" not in pub_dl and "clip_dur" not in pub_dl and "duration" not in pub_dl
+sig_f = Path(tempfile.mkdtemp(prefix="axtools_sig_"))
+try:
+    sf = sig_f / "bin.dat"
+    assert app.Api._file_sig(sf) == ""
+    sf.write_bytes(b"1234")
+    assert app.Api._file_sig(sf).startswith("4:")
+finally:
+    shutil.rmtree(sig_f, ignore_errors=True)
 api.clear_finished("convert")
 assert cv_job["id"] not in api._jobs and dl_job["id"] in api._jobs
 api.clear_finished("download")

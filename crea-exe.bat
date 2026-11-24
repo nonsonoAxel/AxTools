@@ -16,6 +16,15 @@ if errorlevel 1 (
 if not exist "axtools.ico" ".venv\Scripts\python.exe" make_icon.py
 ".venv\Scripts\python.exe" -m PyInstaller --noconfirm --clean --onefile --windowed --name AxTools ^
   --icon "%~dp0axtools.ico" --add-data "%~dp0ui;ui" ^
+  --exclude-module tkinter --exclude-module _tkinter --exclude-module unittest ^
+  --exclude-module pydoc --exclude-module doctest --exclude-module test ^
+  --exclude-module xmlrpc --exclude-module pdb --exclude-module bdb ^
+  --exclude-module idlelib --exclude-module turtle --exclude-module turtledemo ^
+  --exclude-module ensurepip --exclude-module venv --exclude-module pip ^
+  --exclude-module setuptools --exclude-module pkg_resources --exclude-module distutils ^
+  --exclude-module lib2to3 --exclude-module webview.platforms.cocoa ^
+  --exclude-module webview.platforms.gtk --exclude-module webview.platforms.qt ^
+  --exclude-module webview.platforms.android --exclude-module webview.platforms.cef ^
   --distpath . --workpath "%TEMP%\axtools-build" --specpath "%TEMP%\axtools-build" app.py
 if errorlevel 1 (
   echo Creazione dell'EXE non riuscita.

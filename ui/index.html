@@ -339,6 +339,13 @@ select:disabled{opacity:.4;cursor:default}
 .file-item .f-meta{display:flex;align-items:center;gap:8px;color:var(--dim);font-size:11.5px;margin-top:3px;flex-wrap:wrap}
 .conv-controls{padding:12px 16px;border-top:1px solid var(--glass-line);background:rgba(0,0,0,.14);display:flex;align-items:center;gap:12px;flex-wrap:wrap}
 .conv-field{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;color:var(--muted)}
+.conv-range-wrap{gap:9px}
+.conv-range-wrap.dimmed{opacity:.48}
+.conv-range{width:112px;accent-color:var(--c-audio);cursor:pointer}
+.conv-range-val{font-family:var(--mono);font-size:12px;color:var(--text);min-width:114px}
+.conv-mb-in{display:inline-flex;align-items:center;gap:5px;height:30px;padding:0 8px;border-radius:8px;background:var(--s1);border:1px solid var(--line-2);font-size:12px;color:var(--muted);transition:border-color .15s}
+.conv-mb-in:focus-within{border-color:color-mix(in srgb,var(--c-audio) 65%,var(--line-2))}
+.conv-mb-in input{width:54px;border:none;background:none;outline:none;color:var(--text);font-family:var(--mono);font-size:12.5px;text-align:right;user-select:text}
 .tr-bar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:14px}
 .model-pill{display:inline-flex;align-items:center;gap:8px;height:30px;padding:0 11px;border-radius:8px;background:var(--glass);border:1px solid color-mix(in srgb,var(--c-text) 28%,var(--glass-line));font-size:12px;color:var(--muted)}
 .model-pill b{color:var(--text);font-weight:600}
@@ -588,7 +595,8 @@ select:disabled{opacity:.4;cursor:default}
         <div class="conv-controls">
           <label class="conv-field">Formato <select id="convFmt"></select></label>
           <label class="conv-field" id="convPresetWrap">Qualità <select id="convPreset"></select></label>
-          <label class="conv-field" id="convImgResizeWrap" hidden>Dimensione <select id="convImgResize"><option value="0">Originale</option><option value="1920">Max 1920 px</option><option value="1080">Max 1080 px</option><option value="512">Max 512 px</option></select></label>
+          <label class="conv-field conv-range-wrap" id="convVidQualWrap" hidden>Qualità <input type="range" class="conv-range" id="convVidQual" min="10" max="100" step="5" value="100"><span class="conv-range-val" id="convVidQualLbl">100% · Originale</span></label>
+          <label class="conv-field" id="convMaxMbWrap" hidden>Peso max <select id="convMaxMb"></select><span class="conv-mb-in" id="convCustomMbWrap" hidden><input type="number" id="convCustomMb" min="0.1" max="4000" step="0.1" value="2" inputmode="decimal"><span>MB</span></span></label>
           <button type="button" class="dest-chip" id="convDestChip" title="Cambia dove salvare i file convertiti"></button>
           <div style="flex:1"></div>
           <button class="btn primary" id="convStartBtn">Converti</button>
@@ -982,7 +990,9 @@ function syncClipDur(){
   el.style.color = "";
   const dur = current?.duration;
   const endEff = ce !== null ? ce : (dur && dur > st ? dur : null);
-  el.textContent = endEff !== null ? `Durata: ${fmtDur(endEff - st)}` : `Da ${fmtDur(st)} alla fine`;
+  const gpuClip = settings.mode === "video" && !$("#clipFast").checked && settings.convert_gpu !== false && convInfo?.gpu_available;
+  const durTxt = endEff !== null ? `Durata: ${fmtDur(endEff - st)}` : `Da ${fmtDur(st)} alla fine`;
+  el.textContent = gpuClip ? `${durTxt} · Taglio GPU` : durTxt;
   return true;
 }
 $("#clipToggle").onclick = () => {
@@ -994,6 +1004,7 @@ $("#clipToggle").onclick = () => {
 };
 $("#clipStart").oninput = syncClipDur;
 $("#clipEnd").oninput = syncClipDur;
+$("#clipFast").onchange = syncClipDur;
 
 const QUALS = [["best","Max"],["2160","4K"],["1440","1440p"],["1080","1080p"],["720","720p"],["480","480p"]];
 function renderOpts(){
@@ -1193,7 +1204,7 @@ $("#dlBtn").onclick = async () => {
   const useClip = !$("#clipWrap").hidden && !$("#clipBox").hidden && (rs || re);
   if(useClip && !syncClipDur()){ toast("Controlla l'intervallo di taglio (Da – A)", "var(--warn)"); return; }
   const ov = useClip ? {clip_start: rs || null, clip_end: re || null, clip_fast: $("#clipFast").checked} : null;
-  await api.start_download(current.url, {title:current.title, thumbnail:current.thumbnail, site:siteOf(current.url,current.site).n}, ov);
+  await api.start_download(current.url, {title:current.title, thumbnail:current.thumbnail, site:siteOf(current.url,current.site).n, duration:current.duration}, ov);
   $("#preview").classList.remove("show"); $("#url").value=""; syncInput(); resetClip(); current=null;
 };
 
@@ -1212,12 +1223,39 @@ function jobThumbKind(j){
   if(/^(m4a|mp3|wav|flac|ogg|opus)$/i.test(j.quality || "")) return "audio";
   return "video";
 }
+function isJobIndet(j){
+  return (j.status === "converting" || (j.status === "downloading" && !!j.clip)) && (!j.percent || j.percent <= 0);
+}
+function jobRightHTML(j, live, indet){
+  if(!live) return "";
+  return [
+    j.status==="downloading" && j.speed ? `${fmtBytes(j.speed)}/s` : "",
+    j.eta!=null ? fmtDur(j.eta) : "",
+    indet ? "In corso…" : `<b>${(+j.percent||0).toFixed(0)}%</b>`
+  ].filter(Boolean).join('<span class="sep">·</span>');
+}
+function patchJobCard(prev, next){
+  if(!prev) return false;
+  if(["downloading","converting","transcribing","diarizing"].indexOf(next.status) < 0) return false;
+  for(const k of ["status","kind","mode","quality","hw","clip","item","current","title","error","file","thumbnail"]){
+    if((prev[k] ?? "") !== (next[k] ?? "")) return false;
+  }
+  const indet = isJobIndet(next);
+  if(isJobIndet(prev) !== indet) return false;
+  const el = document.querySelector(`.job[data-id="${CSS.escape(next.id)}"]`);
+  if(!el) return false;
+  const bar = el.querySelector(".bar > i"), metaR = el.querySelector(".job-meta-r");
+  if(!bar || !metaR) return false;
+  bar.style.width = (+next.percent || 0) + "%";
+  metaR.innerHTML = jobRightHTML(next, true, indet);
+  return true;
+}
 function renderJobList(container, list, emptySvg, emptyMsg){
   if(!list.length){ container.innerHTML = `<div class="empty">${emptySvg}${emptyMsg}</div>`; return; }
   container.innerHTML = list.map(j => {
     const id = esc(j.id), kind = jobThumbKind(j);
     const live = ["downloading","converting","transcribing","diarizing"].includes(j.status);
-    const indet = j.status === "converting" && (!j.percent || j.percent <= 0);
+    const indet = isJobIndet(j);
     const left = [
       `<span class="status">${STATUS[j.status] || esc(j.status)}</span>`,
       siteHTML(siteOf(j.url || "", j.site)),
@@ -1227,11 +1265,7 @@ function renderJobList(container, list, emptySvg, emptyMsg){
     if(j.clip) left.push(`<span class="tag k-clip">${esc(j.clip)}</span>`);
     if(j.item) left.push(`<span class="tag">${esc(j.item)}</span>`);
     if(j.current) left.push(`<span class="now" title="${esc(j.current)}">${esc(j.current)}</span>`);
-    const right = live ? [
-      j.status==="downloading" && j.speed ? `${fmtBytes(j.speed)}/s` : "",
-      j.eta!=null ? fmtDur(j.eta) : "",
-      indet ? "In corso…" : `<b>${(+j.percent||0).toFixed(0)}%</b>`
-    ].filter(Boolean).join('<span class="sep">·</span>') : "";
+    const right = jobRightHTML(j, live, indet);
     const acts = busy(j) ? `<button class="btn sm icon" title="Annulla" data-act="cancel" data-id="${id}">${IC.x}</button>`
       : j.status==="done" ? `${kind==="text"&&j.file?`<button class="btn sm primary" title="Leggi nell'app" data-act="read" data-id="${id}">${IC.read} Leggi</button>`:""}${j.file?`<button class="btn sm icon" title="Apri file" data-act="open" data-id="${id}">${IC.open}</button>`:""}<button class="btn sm icon" title="Mostra nella cartella" data-act="folder" data-id="${id}">${IC.folder}</button>`
       : `<button class="btn sm icon" title="Riprova" data-act="retry" data-id="${id}">${IC.retry}</button>`;
@@ -1449,10 +1483,11 @@ const CONV_OUT = {
   audio: ["mp3","m4a","wav","flac","ogg","opus"],
   image: ["png","jpg","webp","ico","bmp"],
 };
-const VIDEO_PRESETS = [["balanced","Bilanciata"],["high","Alta qualità"],["compact10","Compatta < 10 MB"]];
 const AUDIO_KBPS = [["320","320 kbps (Massima)"],["192","192 kbps (Consigliata)"],["128","128 kbps (Leggera)"],["96","96 kbps"]];
-const IMG_QUALS = [["92","Alta (92%)"],["85","Bilanciata (85%)"],["70","Leggera (70%)"]];
-let convFiles = [], convInfo = null;
+const IMG_QUALS = [["original","Originale"],["90","Alta (90%)"],["80","Bilanciata (80%)"],["65","Leggera (65%)"]];
+const IMG_MAX_MBS = [["0","Nessun limite"],["0.5","Max 0,5 MB"],["1","Max 1 MB"],["2","Max 2 MB"],["5","Max 5 MB"],["10","Max 10 MB"],["custom","Personalizzato…"]];
+const VID_MAX_MBS = [["0","Nessun limite"],["10","Max 10 MB"],["25","Max 25 MB"],["50","Max 50 MB"],["100","Max 100 MB"],["custom","Personalizzato…"]];
+let convFiles = [], convInfo = null, lastMbKind = "";
 
 async function loadConvertInfo(){ convInfo = await api.convert_info(); renderConvertGpu(); }
 function renderConvertGpu(){
@@ -1476,6 +1511,7 @@ function renderConvertGpu(){
     tog.classList.remove("on"); tog.style.pointerEvents = "none"; tog.style.opacity = ".45";
     txt.textContent = "Nessun encoder video hardware rilevato su questo PC (la conversione usa il processore).";
   }
+  if(current) syncClipDur();
 }
 const toggleConvGpu = () => { if(convInfo?.gpu_available) save({convert_gpu: settings.convert_gpu === false}); };
 $("#convGpuPill").onclick = toggleConvGpu;
@@ -1490,12 +1526,31 @@ function renderConvDest(){
   $("#convDestChip").innerHTML = `${IC.folder}<span>${toDl ? `Cartella Download (${esc(folderShort(settings.folder) || "Download")})` : "Nella stessa cartella"}</span>`;
   $("#convDestChip").title = toDl ? `Salva in: ${settings.folder}` : "Salva nella stessa cartella del file originale · clicca per cambiare";
 }
+function fmtVidQualLbl(v){
+  if(v >= 100) return "100% · Originale";
+  if(v >= 80) return `${v}% · Alta`;
+  if(v >= 55) return `${v}% · Bilanciata`;
+  if(v >= 30) return `${v}% · Compatta`;
+  return `${v}% · Minima`;
+}
+function syncMaxMbUI(){
+  const maxWrap = $("#convMaxMbWrap"), maxSel = $("#convMaxMb"), custWrap = $("#convCustomMbWrap");
+  custWrap.hidden = maxWrap.hidden || maxSel.value !== "custom";
+  const vidWrap = $("#convVidQualWrap");
+  if(!vidWrap.hidden){
+    const capped = !maxWrap.hidden && maxSel.value !== "0";
+    $("#convVidQual").disabled = capped;
+    vidWrap.classList.toggle("dimmed", capped);
+    $("#convVidQualLbl").textContent = capped ? "Auto (peso max)" : fmtVidQualLbl(+$("#convVidQual").value || 100);
+  }
+}
 function syncConvControls(){
   const fmts = allowedConvFmts();
   const fmtSel = $("#convFmt"), prev = fmtSel.value;
   if(!fmts.length){
     fmtSel.innerHTML = `<option value="">Formati incompatibili</option>`;
-    $("#convPresetWrap").hidden = true; $("#convImgResizeWrap").hidden = true;
+    $("#convPresetWrap").hidden = true; $("#convVidQualWrap").hidden = true;
+    $("#convMaxMbWrap").hidden = true; $("#convCustomMbWrap").hidden = true;
     $("#convStartBtn").disabled = true;
     return;
   }
@@ -1510,25 +1565,46 @@ function syncConvControls(){
   const fmt = fmtSel.value;
   const isImg = CONV_OUT.image.includes(fmt);
   const preSel = $("#convPreset"), prevPre = preSel.value;
-  $("#convImgResizeWrap").hidden = !isImg || fmt === "ico";
+  const maxSel = $("#convMaxMb"), prevMb = maxSel.value;
   if(isImg){
+    $("#convVidQualWrap").hidden = true;
     const hideQ = fmt === "png" || fmt === "bmp" || fmt === "ico";
     $("#convPresetWrap").hidden = hideQ;
     if(!hideQ){
       preSel.innerHTML = IMG_QUALS.map(([v,l]) => `<option value="${v}">${l}</option>`).join("");
-      preSel.value = IMG_QUALS.some(([v])=>v===prevPre) ? prevPre : "85";
+      preSel.value = IMG_QUALS.some(([v])=>v===prevPre) ? prevPre : "original";
+    }
+    $("#convMaxMbWrap").hidden = fmt === "ico";
+    if(fmt !== "ico"){
+      maxSel.innerHTML = IMG_MAX_MBS.map(([v,l]) => `<option value="${v}">${l}</option>`).join("");
+      maxSel.value = (lastMbKind === "image" && IMG_MAX_MBS.some(([v])=>v===prevMb)) ? prevMb : "0";
+      const cust = $("#convCustomMb");
+      cust.min = "0.1"; cust.max = "500"; cust.step = "0.1";
+      if(lastMbKind !== "image") cust.value = "2";
+      lastMbKind = "image";
     }
   } else if(fmt === "wav" || fmt === "flac" || fmt === "gif"){
     $("#convPresetWrap").hidden = true;
+    $("#convVidQualWrap").hidden = true;
+    $("#convMaxMbWrap").hidden = true;
   } else if(["mp3","m4a","ogg","opus"].includes(fmt)){
     $("#convPresetWrap").hidden = false;
+    $("#convVidQualWrap").hidden = true;
+    $("#convMaxMbWrap").hidden = true;
     preSel.innerHTML = AUDIO_KBPS.map(([v,l]) => `<option value="${v}">${l}</option>`).join("");
     preSel.value = AUDIO_KBPS.some(([v])=>v===prevPre) ? prevPre : "192";
   } else {
-    $("#convPresetWrap").hidden = false;
-    preSel.innerHTML = VIDEO_PRESETS.map(([v,l]) => `<option value="${v}">${l}</option>`).join("");
-    preSel.value = VIDEO_PRESETS.some(([v])=>v===prevPre) ? prevPre : "balanced";
+    $("#convPresetWrap").hidden = true;
+    $("#convVidQualWrap").hidden = false;
+    $("#convMaxMbWrap").hidden = false;
+    maxSel.innerHTML = VID_MAX_MBS.map(([v,l]) => `<option value="${v}">${l}</option>`).join("");
+    maxSel.value = (lastMbKind === "video" && VID_MAX_MBS.some(([v])=>v===prevMb)) ? prevMb : "0";
+    const cust = $("#convCustomMb");
+    cust.min = "1"; cust.max = "4000"; cust.step = "1";
+    if(lastMbKind !== "video") cust.value = "15";
+    lastMbKind = "video";
   }
+  syncMaxMbUI();
 }
 function fileRowHTML(icon, name, meta, idx){
   return `<div class="file-item">${icon}<div class="f-main"><div class="f-name" title="${esc(name)}">${esc(name)}</div><div class="f-meta">${esc(meta)}</div></div><button class="btn sm icon" data-rm="${idx}" title="Rimuovi">${IC.x}</button></div>`;
@@ -1564,19 +1640,38 @@ $("#convFiles").onclick = e => {
   convFiles.splice(+b.dataset.rm, 1); renderConvFiles();
 };
 $("#convFmt").onchange = syncConvControls;
+$("#convVidQual").oninput = syncMaxMbUI;
+$("#convMaxMb").onchange = () => { syncMaxMbUI(); if($("#convMaxMb").value === "custom") $("#convCustomMb").focus(); };
 $("#convDestChip").onclick = () => save({convert_dest: settings.convert_dest === "downloads" ? "same" : "downloads"});
 $("#convStartBtn").onclick = async () => {
   if(!convFiles.length) return;
   const fmt = $("#convFmt").value;
   if(!fmt){ toast("Rimuovi i file di tipo diverso per convertire insieme", "var(--warn)"); return; }
   const isImg = CONV_OUT.image.includes(fmt), isAud = ["mp3","m4a","ogg","opus"].includes(fmt);
+  const isVid = !isImg && !isAud && !["wav","flac","gif"].includes(fmt);
   const pv = $("#convPreset").value;
+  let maxMb = 0;
+  if(!$("#convMaxMbWrap").hidden){
+    const raw = $("#convMaxMb").value;
+    if(raw === "custom"){
+      const v = parseFloat(String($("#convCustomMb").value || "").replace(",", "."));
+      if(!Number.isFinite(v) || v <= 0){
+        toast("Inserisci un peso massimo valido in MB", "var(--warn)");
+        $("#convCustomMb").focus();
+        return;
+      }
+      maxMb = v;
+    } else {
+      maxMb = parseFloat(raw) || 0;
+    }
+  }
   const opts = {
     fmt,
-    video_preset: (!isImg && !isAud) ? (pv || "balanced") : "balanced",
+    video_quality: isVid ? +($("#convVidQual").value || 100) : 100,
+    video_max_mb: isVid ? maxMb : 0,
     audio_kbps: isAud ? +(pv || 192) : 192,
-    image_quality: isImg ? +(pv || 85) : 85,
-    image_max_side: isImg && !$("#convImgResizeWrap").hidden ? +($("#convImgResize").value || 0) : 0,
+    image_quality: isImg ? (pv || "original") : "original",
+    image_max_mb: isImg ? maxMb : 0,
     dest_mode: settings.convert_dest === "downloads" ? "downloads" : "same",
     use_gpu: settings.convert_gpu !== false,
   };
@@ -1972,7 +2067,8 @@ window.onBackend = (ev, data) => {
   if(ev==="dropped_files"){ handleDroppedFiles(data); return; }
   if(ev==="model"){ if(downloading){ Object.assign(downloading, data); renderWhisper(); } return; }
   if(ev==="job"){
-    const prevJob = jobs[data.id], prev = prevJob?.status; jobs[data.id] = data; renderQueues();
+    const prevJob = jobs[data.id], prev = prevJob?.status; jobs[data.id] = data;
+    if(!patchJobCard(prevJob, data)) renderQueues();
     if(data.warning && !prevJob?.warning) toast(data.warning, "var(--warn)");
     if(prev!==data.status && data.status==="done") toast("Completato: "+data.title, "var(--ok)");
     if(prev!==data.status && data.status==="error") toast("Errore: "+data.title, "var(--err)");
@@ -2029,8 +2125,7 @@ $("#checkAppBtn").onclick = async () => {
 $("#repoLink").onclick = e => { e.preventDefault(); api.open_url(appInfo.repo); };
 
 async function init(){
-  settings = await api.get_settings(); history = await api.get_history();
-  appInfo = await api.app_info();
+  [settings, history, appInfo] = await Promise.all([api.get_settings(), api.get_history(), api.app_info()]);
   $("#appVer").textContent = `Versione ${appInfo.version}`; $("#aboutVer").textContent = appInfo.version;
   syncInput(); renderSettings(); renderOpts(); renderQueues();
   await ensureDeps(); loadVersion(); loadWhisper(); loadConvertInfo();
@@ -2131,6 +2226,7 @@ function makeDemoApi(){
       const clipLbl = (ov?.clip_start || ov?.clip_end) ? `${ov.clip_start||"0:00"}–${ov.clip_end||"fine"}` : "";
       const j = {id, kind, mode, url:u, title:info.title||u, site:info.site||siteOf(u).n, status:"queued", percent:0,
         quality: mode==="text" ? "Testo" : mode==="thumb" ? "JPG" : mode==="audio" ? st.audio_format.toUpperCase() : (st.quality==="best"?"Max":st.quality+"p"),
+        hw: clipLbl && !ov?.clip_fast && mode==="video" && st.convert_gpu ? "GPU" : "",
         clip:clipLbl, thumbnail:info.thumbnail||th, folder:st.folder, file: mode==="text" ? "demo-podcast.txt" : "demo.mp4"};
       const steps = mode==="text"
         ? [{status:"downloading",percent:35,speed:9.1e6,eta:4},{status:"transcribing",percent:45,eta:5},{status:"diarizing",percent:75,eta:2}]
@@ -2202,8 +2298,8 @@ function makeDemoApi(){
     cancel: async()=>1, retry: async()=>1,
     clear_finished: async()=>1, clear_history: async()=>{ hist=[]; return 1; },
     open_file: async()=>true, open_folder: async()=>true, paste: async()=>"", choose_folder: async()=>null, update_ytdlp: async()=>({ok:true,message:"yt-dlp è aggiornato"}),
-    app_info: async()=>({version:"1.4.0", repo:"https://github.com/nonsonoAxel/AxTools"}),
-    check_update: async()=>({ok:true, update:false, current:"1.4.0", latest:"1.4.0", page:"https://github.com/nonsonoAxel/AxTools/releases/latest"}),
+    app_info: async()=>({version:"1.5.0", repo:"https://github.com/nonsonoAxel/AxTools"}),
+    check_update: async()=>({ok:true, update:false, current:"1.5.0", latest:"1.5.0", page:"https://github.com/nonsonoAxel/AxTools/releases/latest"}),
     open_url: async()=>1,
     open_log: async()=>1, data_info: async()=>({path:"C:\\Users\\Andrea\\AppData\\Local\\AxTools", size:720e6, exe:"C:\\Users\\Andrea\\Desktop\\AxTools.exe"}), open_data_folder: async()=>1, uninstall: async()=>1,
     win_drag: async()=>0, win_resize: async()=>0, win_minimize: async()=>0, win_close: async()=>0, win_toggle_max: async()=>(maxed=!maxed),
