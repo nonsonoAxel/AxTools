@@ -6,6 +6,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 
 VIDEO_IN = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".flv", ".ts", ".m4v", ".3gp", ".wmv"}
@@ -407,7 +408,7 @@ def convert_image(src: Path, dst: Path, fmt: str, quality="original", max_side: 
     src_ext = src.suffix.lower()
     src_lossless = src_ext in {".png", ".bmp", ".tif", ".tiff", ".ico"}
 
-    with Image.open(src) as orig:
+    with Image.open(src) as orig, tempfile.TemporaryDirectory(prefix="axtools_img_") as td:
         im = ImageOps.exif_transpose(orig)
         resampling = getattr(Image, "Resampling", Image).LANCZOS
         if side and max(im.size) > side:
@@ -424,26 +425,28 @@ def convert_image(src: Path, dst: Path, fmt: str, quality="original", max_side: 
             base.save(dst, format="ICO", sizes=sizes)
             return
 
+        jpg_tmp = Path(td) / "out.jpg"
         can_keep_jpeg = (
             fmt == "jpg" and q_spec == "original" and src_ext in {".jpg", ".jpeg"}
             and not side and base is orig and bool(getattr(orig, "quantization", None))
         )
 
         def _encode(img, q_val, fast_png: bool = False) -> bytes:
-            buf = io.BytesIO()
             if fmt == "jpg":
                 if q_val == "original":
                     if can_keep_jpeg and img is base:
                         try:
-                            img.save(buf, format="JPEG", quality="keep", optimize=True)
-                            return buf.getvalue()
+                            img.save(jpg_tmp, format="JPEG", quality="keep", optimize=True)
+                            return jpg_tmp.read_bytes()
                         except (ValueError, KeyError):
-                            buf = io.BytesIO()
-                    img.save(buf, format="JPEG", quality=95, subsampling=0, optimize=True)
+                            pass
+                    img.save(jpg_tmp, format="JPEG", quality=95, subsampling=0, optimize=True)
                 else:
                     qv = int(q_val)
-                    img.save(buf, format="JPEG", quality=qv, subsampling=0 if qv >= 90 else 2, optimize=True)
-            elif fmt == "webp":
+                    img.save(jpg_tmp, format="JPEG", quality=qv, subsampling=0 if qv >= 90 else 2, optimize=True)
+                return jpg_tmp.read_bytes()
+            buf = io.BytesIO()
+            if fmt == "webp":
                 if q_val == "original":
                     if src_lossless:
                         img.save(buf, format="WEBP", lossless=True, quality=80, method=4)
