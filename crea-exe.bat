@@ -21,7 +21,7 @@ if not exist "axtools.ico" ".venv\Scripts\python.exe" make_icon.py
   --exclude-module xmlrpc --exclude-module pdb --exclude-module bdb ^
   --exclude-module idlelib --exclude-module turtle --exclude-module turtledemo ^
   --exclude-module ensurepip --exclude-module venv --exclude-module pip ^
-  --exclude-module setuptools --exclude-module pkg_resources --exclude-module distutils ^
+  --exclude-module setuptools --exclude-module pkg_resources ^
   --exclude-module lib2to3 --exclude-module webview.platforms.cocoa ^
   --exclude-module webview.platforms.gtk --exclude-module webview.platforms.qt ^
   --exclude-module webview.platforms.android --exclude-module webview.platforms.cef ^
